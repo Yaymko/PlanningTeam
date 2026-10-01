@@ -71,11 +71,35 @@ streamlit run app.py
 
 ```
 team_load_app/
-├── app.py              # всё приложение: разбор файла, UI, дашборд, экспорт
-├── requirements.txt    # зависимости Python
-├── run.bat             # быстрый запуск на Windows (ставит зависимости и стартует)
+├── app.py                      # UI: Streamlit-страницы, дашборд, вкладки
+├── core.py                     # чистая логика без Streamlit: разбор файла, сборка Excel-экспорта
+├── tests/                      # unit- и smoke-тесты (pytest)
+├── requirements.txt            # зависимости приложения
+├── requirements-dev.txt        # + зависимости для разработки (pytest, ruff)
+├── pyproject.toml              # конфиг ruff
+├── .github/workflows/ci.yml    # CI: линт + тесты на каждый push/PR
+├── run.bat                     # быстрый запуск на Windows (ставит зависимости и стартует)
 └── README.md
 ```
+
+## Разработка и CI
+
+Логика разбора файла и сборки Excel-экспорта вынесена в `core.py` отдельно от
+Streamlit-интерфейса в `app.py` — это позволяет тестировать её напрямую, без запуска
+веб-сервера.
+
+Локально, перед коммитом:
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .          # линт
+pytest -q             # unit-тесты core.py + smoke-тест запуска app.py
+```
+
+На GitHub настроен workflow `.github/workflows/ci.yml` — при каждом push и pull request
+в `main` он на Python 3.11 и 3.12 прогоняет линт (`ruff`), проверку компиляции и тесты.
+Если какой-то шаг падает — PR будет помечен красным, это сигнал не мёржить, пока не
+починено.
 
 ## Данные
 
