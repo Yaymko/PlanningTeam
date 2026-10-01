@@ -27,11 +27,19 @@ if not uploaded:
 if "file_name" not in st.session_state or st.session_state.file_name != uploaded.name:
     people_data, week_labels = parse_workbook_cached(uploaded.getvalue())
     st.session_state.file_name = uploaded.name
+    # base_people_data is the baseline handed to each data_editor widget. It must stay
+    # byte-for-byte identical across reruns (same values/dtypes) — if we fed the editor
+    # its own previously-edited-and-cleaned output back in as "data", Streamlit treats
+    # it as a new dataset and can reset in-progress edits, which is why typed hours
+    # sometimes didn't stick on the first try. people_data (below) is the live, edited
+    # copy used for the dashboard/export and is never passed back into data_editor.
+    st.session_state.base_people_data = {k: v.copy() for k, v in people_data.items()}
     st.session_state.people_data = {k: v.copy() for k, v in people_data.items()}
     st.session_state.week_labels = week_labels
     st.session_state.norms = {name: DEFAULT_NORM for name in people_data}
 
 people_data = st.session_state.people_data
+base_people_data = st.session_state.base_people_data
 week_labels = st.session_state.week_labels
 
 if not week_labels:
@@ -50,7 +58,6 @@ with tab_input:
                                 min_value=0.0, value=float(st.session_state.norms[selected]), step=1.0)
     st.session_state.norms[selected] = norm_val
 
-    df = people_data[selected]
     column_config = {
         "Тикет": st.column_config.TextColumn(),
         "Название": st.column_config.TextColumn(width="large"),
@@ -62,7 +69,10 @@ with tab_input:
     for wl in week_labels:
         column_config[wl] = st.column_config.NumberColumn(clean_week_label(wl), min_value=0.0, step=0.5)
 
-    edited = st.data_editor(df, column_config=column_config, hide_index=True,
+    # Always hand the editor the same untouched baseline for this person — Streamlit
+    # owns the live edits internally via `key` from that point on. Passing our cleaned-up
+    # `edited` copy back in here on the next rerun is what caused dropped/stuck edits.
+    edited = st.data_editor(base_people_data[selected], column_config=column_config, hide_index=True,
                              use_container_width=True, num_rows="dynamic", key=f"editor_{selected}")
 
     # Newly added rows arrive with NaN/None in unfilled cells — normalise before aggregation/export.
