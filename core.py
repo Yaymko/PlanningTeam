@@ -66,6 +66,51 @@ def parse_workbook(file_bytes: bytes):
     return people_data, (week_labels or [])
 
 
+def normalize_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
+    """Приводит таблицу тикетов к единому виду: пустые ячейки новых строк -> значения по умолчанию,
+    часы -> float. Нужна после data_editor (добавленные строки приходят с NaN/None)."""
+    df = df.reindex(columns=FIXED_COLS + list(week_labels)).copy()
+    df["Тикет"] = df["Тикет"].fillna("").astype(str)
+    df["Название"] = df["Название"].fillna("").astype(str)
+    df["Колонка"] = df["Колонка"].fillna("Доп. работа").astype(str)
+    df["Доска"] = df["Доска"].fillna("").astype(str)
+    df["Срок"] = df["Срок"].astype(object).where(df["Срок"].notna(), None)
+    df["В работе"] = df["В работе"].fillna(False).astype(bool)
+    for wl in week_labels:
+        df[wl] = pd.to_numeric(df[wl], errors="coerce").fillna(0.0).astype(float)
+    return df.reset_index(drop=True)
+
+
+def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
+    """Переносит уже сохранённые часы в свежую выгрузку с доски.
+
+    Часы по тикетам переносятся по номеру тикета для недель, которые есть в обеих выгрузках.
+    Строки «Доп. работа» с названием, которых нет в новой выгрузке, добавляются в конец.
+    """
+    new_df = normalize_rows(new_df, week_labels)
+    common_weeks = [wl for wl in week_labels if wl in old_df.columns]
+    if old_df.empty or not common_weeks:
+        return new_df
+    old_df = normalize_rows(old_df, [wl for wl in old_df.columns if wl not in FIXED_COLS])
+
+    old_by_ticket = {}
+    for _, row in old_df.iterrows():
+        if row["Тикет"]:
+            old_by_ticket.setdefault(row["Тикет"], row)
+    for i, ticket in new_df["Тикет"].items():
+        if ticket in old_by_ticket:
+            for wl in common_weeks:
+                new_df.at[i, wl] = float(old_by_ticket[ticket][wl])
+
+    existing_titles = set(new_df.loc[new_df["Тикет"] == "", "Название"])
+    extra = old_df[(old_df["Тикет"] == "") & (old_df["Название"] != "")
+                   & ~old_df["Название"].isin(existing_titles)]
+    if not extra.empty:
+        extra = normalize_rows(extra, week_labels)
+        new_df = pd.concat([new_df, extra], ignore_index=True)
+    return new_df
+
+
 def clean_week_label(label: str) -> str:
     return re.sub(r"\s*ч\.?$", "", str(label)).strip()
 
