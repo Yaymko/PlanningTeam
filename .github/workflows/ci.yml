@@ -29,7 +29,7 @@ jobs:
         run: ruff check .
 
       - name: Byte-compile check
-        run: python -m py_compile app.py core.py
+        run: python -m py_compile app.py core.py storage.py
 
       - name: Run tests
         run: pytest -q
