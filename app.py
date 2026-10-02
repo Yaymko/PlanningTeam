@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from core import build_export_workbook, clean_week_label, parse_workbook
+from core import DELETE_COL, build_export_workbook, clean_week_label, drop_marked_rows, parse_workbook
 from storage import Store, db_path_from_env
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
@@ -48,7 +48,8 @@ with tab_mine:
         week_labels = plan["week_labels"]
         st.caption("Выберите себя, впишите часы по тикетам на неделю и нажмите «Сохранить». Строки "
                    "«Доп. работа» — для задач, которых нет на доске: впишите название и часы. Новые строки "
-                   "добавляются кнопкой «+» внизу таблицы, лишние удаляются иконкой корзины.")
+                   "добавляются кнопкой «+» внизу таблицы. Чтобы убрать тикет или работу, отметьте "
+                   "галочку «Удалить» в начале строки: строка удалится при сохранении.")
         selected = st.selectbox("Сотрудник", store.people(), index=None, placeholder="Выберите себя из списка")
         if selected:
             # The editor's baseline must stay identical across reruns, otherwise Streamlit resets
@@ -61,6 +62,7 @@ with tab_mine:
             if editor_key not in baselines:
                 df, norm, saved_at = store.load_person(selected)
                 df["Срок"] = pd.to_datetime(df["Срок"])  # proper date column for the editor (empty, not "None")
+                df.insert(0, DELETE_COL, False)
                 baselines[editor_key] = (df, norm, saved_at)
             base_df, saved_norm, saved_at = baselines[editor_key]
 
@@ -74,6 +76,9 @@ with tab_mine:
                                        key=f"norm_{editor_key}")
 
             column_config = {
+                DELETE_COL: st.column_config.CheckboxColumn(
+                    help="Отметьте, чтобы удалить строку. Удаление применяется при нажатии «Сохранить».",
+                    default=False),
                 "Тикет": st.column_config.TextColumn(),
                 "Название": st.column_config.TextColumn(width="large"),
                 "Колонка": st.column_config.TextColumn(),
@@ -86,8 +91,13 @@ with tab_mine:
 
             edited = st.data_editor(base_df, column_config=column_config, hide_index=True,
                                     use_container_width=True, num_rows="dynamic", key=editor_key)
+            kept = drop_marked_rows(edited)
+            marked = len(edited) - len(kept)
+            if marked:
+                st.caption(f":red[Отмечено к удалению строк: {marked}. Они удалятся при сохранении "
+                           "и уже не учитываются в итогах ниже.]")
 
-            totals = {clean_week_label(wl): pd.to_numeric(edited[wl], errors="coerce").fillna(0).sum()
+            totals = {clean_week_label(wl): pd.to_numeric(kept[wl], errors="coerce").fillna(0).sum()
                       for wl in week_labels}
             cols = st.columns(len(totals))
             for col, (week, hours) in zip(cols, totals.items()):
@@ -102,7 +112,7 @@ with tab_mine:
                 st.caption(":orange[Есть несохранённые изменения.]")
 
             if st.button("Сохранить", type="primary"):
-                store.save_person(selected, edited, norm_val)
+                store.save_person(selected, kept, norm_val)
                 versions[selected] = ver + 1
                 baselines.pop(editor_key, None)
                 st.toast("Часы сохранены")

@@ -74,3 +74,19 @@ def test_reupload_keeps_hours_for_matching_tickets_and_weeks(tmp_path):
     assert list(df[NEXT_WEEKS[1]]) == [0.0, 0.0, 0.0]
     assert norm == 30.0 and saved_at is None
     assert store.people() == ["Иванов", "Петрова"]
+
+
+def test_rows_marked_for_deletion_are_removed_on_save(tmp_path):
+    from core import DELETE_COL, drop_marked_rows
+
+    store = Store(tmp_path / "db.sqlite")
+    rows = [_ticket("A-1", WEEKS, [1, 0]), _ticket("B-2", WEEKS, [2, 0]), _ticket("C-3", WEEKS, [3, 0])]
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, rows)}, WEEKS)
+
+    df, _, _ = store.load_person("Иванов")
+    df.insert(0, DELETE_COL, [False, True, None])  # None: a row added in data_editor, box untouched
+    store.save_person("Иванов", drop_marked_rows(df), 40)
+
+    df, _, _ = store.load_person("Иванов")
+    assert list(df["Тикет"]) == ["A-1", "C-3"]
+    assert DELETE_COL not in df.columns

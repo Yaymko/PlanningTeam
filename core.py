@@ -81,6 +81,17 @@ def normalize_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+DELETE_COL = "Удалить"
+
+
+def drop_marked_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Убирает строки, отмеченные галочкой в колонке «Удалить», и саму колонку."""
+    if DELETE_COL not in df.columns:
+        return df
+    marked = df[DELETE_COL].fillna(False).astype(bool)
+    return df[~marked].drop(columns=DELETE_COL).reset_index(drop=True)
+
+
 def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
     """Переносит уже сохранённые часы в свежую выгрузку с доски.
 
