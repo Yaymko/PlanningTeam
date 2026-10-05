@@ -57,3 +57,40 @@ def test_employee_saves_hours_and_planning_sees_them(monkeypatch, tmp_path):
     assert norm == 32.0
     assert saved_at
     assert any("Ещё не заполнили: Петрова Анна" in w.value for w in at.warning)
+
+
+def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+
+    from core import actual_label
+
+    monday = date.today() - timedelta(days=date.today().weekday())
+    weeks = [f"{(monday + timedelta(weeks=i)):%d.%m}–{(monday + timedelta(weeks=i, days=6)):%d.%m} ч"
+             for i in range(-1, 3)]
+    row = {"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
+           "Срок": None, "В работе": True}
+    for i, wl in enumerate(weeks):
+        row[wl], row[actual_label(wl)] = float(i + 1), float(i + 10)
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", {"Иванов Иван": pd.DataFrame([row])}, weeks)
+    store = Store(db)
+    df, _, _ = store.load_person("Иванов Иван")
+    df.loc[0, [actual_label(wl) for wl in weeks]] = [10.0, 11.0, 12.0, 13.0]  # plan upload drops actuals
+    store.save_person("Иванов Иван", df, 40)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    at.selectbox[0].select("Иванов Иван").run()
+    assert not at.exception
+    labels = [m.label for m in at.metric]
+    assert labels == [f"План {weeks[1][:-2]}", f"План {weeks[2][:-2]}"]
+
+    next(b for b in at.button if b.label == "Сохранить").click().run()
+    assert not at.exception
+    df, _, _ = Store(db).load_person("Иванов Иван")
+    assert [df.loc[0, wl] for wl in weeks] == [1.0, 2.0, 3.0, 4.0]
+    assert [df.loc[0, actual_label(wl)] for wl in weeks] == [10.0, 11.0, 12.0, 13.0]
+
+    at.toggle(key="all_weeks_mine").set_value(True).run()
+    assert not at.exception
+    assert len(at.metric) == 4

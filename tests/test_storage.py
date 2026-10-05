@@ -90,3 +90,50 @@ def test_rows_marked_for_deletion_are_removed_on_save(tmp_path):
     df, _, _ = store.load_person("Иванов")
     assert list(df["Тикет"]) == ["A-1", "C-3"]
     assert DELETE_COL not in df.columns
+
+
+def test_actual_hours_saved_and_carried_over_on_reupload(tmp_path):
+    from core import actual_label
+
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [5, 7])])}, WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    assert df.loc[0, actual_label(WEEKS[0])] == 0.0  # board export has no actuals
+    df.loc[0, actual_label(WEEKS[0])] = 6.0
+    store.save_person("Иванов", df, 40)
+
+    df, _, _ = store.load_person("Иванов")
+    assert df.loc[0, actual_label(WEEKS[0])] == 6.0
+
+    new = _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0])])
+    store.save_plan("w2.xlsx", {"Иванов": new}, NEXT_WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    assert df.loc[0, NEXT_WEEKS[0]] == 7.0
+    assert df.loc[0, actual_label(NEXT_WEEKS[0])] == 0.0
+    assert actual_label(WEEKS[0]) not in df.columns
+
+
+def test_database_saved_before_actual_hours_still_loads(tmp_path):
+    """A team_load.db written by the previous version (rows JSON without actual hours) keeps working."""
+    import json
+    import sqlite3
+
+    from core import actual_label
+
+    path = tmp_path / "db.sqlite"
+    Store(path)
+    old_rows = [{"Тикет": "A-1", "Название": "Задача", "Колонка": "10 Работа", "Доска": "1267",
+                 "Срок": "2026-10-03", "В работе": True, WEEKS[0]: 4.0, WEEKS[1]: 2.0}]
+    with sqlite3.connect(path) as conn:
+        conn.execute("INSERT INTO plan (id, file_name, uploaded_at, week_labels) VALUES (1, 'old.xlsx', "
+                     "'2026-10-01T10:00:00+03:00', ?)", (json.dumps(WEEKS, ensure_ascii=False),))
+        conn.execute("INSERT INTO people (name, position, rows, norm, updated_at) VALUES (?, 0, ?, 32, NULL)",
+                     ("Иванов", json.dumps(old_rows, ensure_ascii=False)))
+
+    store = Store(path)
+    df, norm, _ = store.load_person("Иванов")
+    assert df.loc[0, WEEKS[0]] == 4.0 and norm == 32.0
+    assert df.loc[0, actual_label(WEEKS[1])] == 0.0
+    df.loc[0, actual_label(WEEKS[1])] = 3.5
+    store.save_person("Иванов", df, norm)
+    assert store.load_person("Иванов")[0].loc[0, actual_label(WEEKS[1])] == 3.5

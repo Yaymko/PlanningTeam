@@ -55,3 +55,25 @@ def test_export_contains_summary_and_person_sheets():
 def __to_tmp(data: bytes):
     import io
     return io.BytesIO(data)
+
+
+def test_export_includes_actual_hours():
+    from core import actual_label
+
+    people = _sample_people_data()
+    df = people["Иванов Иван Иванович"]
+    df[actual_label(WEEK_LABELS[0])] = [5.0, 1.0]
+    wb = openpyxl.load_workbook(__to_tmp(build_export_workbook(people, WEEK_LABELS, {})))
+
+    person_ws = wb["Иванов Иван Иванович"]
+    headers = [c.value for c in person_ws[2]]
+    act_col = headers.index(actual_label(WEEK_LABELS[0])) + 1
+    assert person_ws.cell(row=3, column=act_col).value == 5.0
+    assert person_ws.cell(row=4, column=act_col).value == 1.0
+    assert person_ws.cell(row=3, column=headers.index(actual_label(WEEK_LABELS[1])) + 1).value == 0.0
+    assert "Итого факт, ч." in headers
+
+    summary_ws = wb[SUMMARY_SHEET_NAME]
+    summary_headers = [c.value for c in summary_ws[3]]
+    cell = summary_ws.cell(row=4, column=summary_headers.index(actual_label(WEEK_LABELS[0])) + 1)
+    assert str(cell.value).startswith("='Иванов Иван Иванович'!")

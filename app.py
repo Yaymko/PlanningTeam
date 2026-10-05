@@ -5,14 +5,24 @@
 Сотрудники заранее заполняют свои часы во вкладке «Мои часы» и сохраняют их в общую базу;
 на встрече во вкладке «Планирование» видны часы всех и выгружается отчёт на неделю.
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from core import DELETE_COL, build_export_workbook, clean_week_label, drop_marked_rows, parse_workbook
+from core import (
+    DELETE_COL,
+    FIXED_COLS,
+    actual_label,
+    build_export_workbook,
+    clean_week_label,
+    drop_marked_rows,
+    hour_cols,
+    nearest_weeks,
+    parse_workbook,
+)
 from storage import Store, db_path_from_env
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
@@ -21,6 +31,13 @@ st.set_page_config(page_title="Загрузка команды", layout="wide")
 @st.cache_resource(show_spinner=False)
 def get_store(path: str) -> Store:
     return Store(path)
+
+
+def visible_weeks(week_labels, key):
+    """Ближайшие 2 недели (текущая и следующая) или все, если включён переключатель."""
+    show_all = st.toggle("Показать все недели плана", key=key,
+                         help="По умолчанию видны только текущая и следующая неделя.")
+    return list(week_labels) if show_all else nearest_weeks(week_labels, date.today())
 
 
 def fmt_saved(ts):
@@ -46,7 +63,8 @@ with tab_mine:
                 "«Планирование» — после этого каждый сотрудник сможет заполнить здесь свои часы.")
     else:
         week_labels = plan["week_labels"]
-        st.caption("Выберите себя, впишите часы по тикетам на неделю и нажмите «Сохранить». Строки "
+        st.caption("Выберите себя, впишите плановые часы по тикетам на неделю и нажмите «Сохранить». "
+                   "В конце недели впишите в колонку «факт» сколько часов реально ушло и снова сохраните. Строки "
                    "«Доп. работа» — для задач, которых нет на доске: впишите название и часы. Новые строки "
                    "добавляются кнопкой «+» внизу таблицы. Чтобы убрать тикет или работу, отметьте "
                    "галочку «Удалить» в начале строки: строка удалится при сохранении.")
@@ -87,23 +105,34 @@ with tab_mine:
                 "В работе": st.column_config.CheckboxColumn(),
             }
             for wl in week_labels:
-                column_config[wl] = st.column_config.NumberColumn(clean_week_label(wl), min_value=0.0, step=0.5)
+                column_config[wl] = st.column_config.NumberColumn(
+                    f"{clean_week_label(wl)} план", min_value=0.0, step=0.5)
+                column_config[actual_label(wl)] = st.column_config.NumberColumn(
+                    f"{clean_week_label(wl)} факт", min_value=0.0, step=0.5,
+                    help="Сколько часов реально ушло на задачу за неделю. Заполняется в конце недели.")
 
-            edited = st.data_editor(base_df, column_config=column_config, hide_index=True,
-                                    use_container_width=True, num_rows="dynamic", key=editor_key)
+            shown_weeks = visible_weeks(week_labels, key="all_weeks_mine")
+            # Hidden weeks stay in the data (column_order only hides them), so saving keeps their hours.
+            column_order = [DELETE_COL, *FIXED_COLS, *hour_cols(shown_weeks)]
+            edited = st.data_editor(base_df, column_config=column_config, column_order=column_order,
+                                    hide_index=True, use_container_width=True, num_rows="dynamic",
+                                    key=editor_key)
             kept = drop_marked_rows(edited)
             marked = len(edited) - len(kept)
             if marked:
                 st.caption(f":red[Отмечено к удалению строк: {marked}. Они удалятся при сохранении "
                            "и уже не учитываются в итогах ниже.]")
 
-            totals = {clean_week_label(wl): pd.to_numeric(kept[wl], errors="coerce").fillna(0).sum()
-                      for wl in week_labels}
-            cols = st.columns(len(totals))
-            for col, (week, hours) in zip(cols, totals.items()):
+            def col_sum(col):
+                return pd.to_numeric(kept[col], errors="coerce").fillna(0).sum()
+
+            cols = st.columns(len(shown_weeks))
+            for col, wl in zip(cols, shown_weeks):
+                hours, actual = col_sum(wl), col_sum(actual_label(wl))
                 delta = hours - norm_val
-                col.metric(f"Итого {week}", f"{hours:g} ч", f"{delta:+g} ч к норме",
+                col.metric(f"План {clean_week_label(wl)}", f"{hours:g} ч", f"{delta:+g} ч к норме",
                            delta_color="inverse" if delta > 0 else "off")
+                col.caption(f"Факт: {actual:g} ч")
 
             editor_state = st.session_state.get(editor_key, {})
             dirty = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows")) \
@@ -135,17 +164,21 @@ with tab_planning:
 
     if plan:
         week_labels = plan["week_labels"]
-        week_cols = [clean_week_label(w) for w in week_labels]
         everyone = store.load_all()
         st.button("Обновить", help="Подтянуть часы, сохранённые коллегами с момента открытия страницы")
+        shown_weeks = visible_weeks(week_labels, key="all_weeks_planning")
+        week_cols = [clean_week_label(w) for w in shown_weeks]
+        fact_cols = [f"{wc} факт" for wc in week_cols]
 
         rows = []
         for name, (df, norm, saved_at) in everyone.items():
             row = {"Сотрудник": name, "Сохранено": fmt_saved(saved_at), "Норма, ч/нед": norm}
-            for wl, wc in zip(week_labels, week_cols):
+            for wl, wc, fc in zip(shown_weeks, week_cols, fact_cols):
                 row[wc] = df[wl].sum()
+                row[fc] = df[actual_label(wl)].sum()
             rows.append(row)
-        summary = pd.DataFrame(rows, columns=["Сотрудник", "Сохранено", "Норма, ч/нед", *week_cols])
+        paired_cols = [c for pair in zip(week_cols, fact_cols) for c in pair]
+        summary = pd.DataFrame(rows, columns=["Сотрудник", "Сохранено", "Норма, ч/нед", *paired_cols])
 
         not_filled = [name for name, (_, _, saved_at) in everyone.items() if not saved_at]
         filled = len(everyone) - len(not_filled)
@@ -155,6 +188,7 @@ with tab_planning:
             st.success(f"Все {len(everyone)} сотрудников заполнили часы.")
 
         st.subheader("Сводка по команде")
+        st.caption("По каждой неделе — план и рядом факт. Подсветка перегруза — по плану.")
 
         def highlight_overload(row):
             styles = []
@@ -168,7 +202,7 @@ with tab_planning:
             return styles
 
         styled = (summary.style.apply(highlight_overload, axis=1)
-                  .format(precision=1, subset=week_cols)
+                  .format(precision=1, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -186,6 +220,7 @@ with tab_planning:
                 team_norm = summary["Норма, ч/нед"].sum()
                 fig2 = go.Figure()
                 fig2.add_bar(x=week_cols, y=team_total.values, name="Запланировано, ч")
+                fig2.add_bar(x=week_cols, y=summary[fact_cols].sum().values, name="Факт, ч")
                 fig2.add_scatter(x=week_cols, y=[team_norm] * len(week_cols),
                                  mode="lines+markers", name="Норма команды, ч")
                 fig2.update_layout(title="Суммарная загрузка команды по неделям vs норма")
@@ -200,8 +235,8 @@ with tab_planning:
 
         st.divider()
         st.subheader("Отчёт на неделю")
-        st.caption("Excel с сохранёнными часами всех сотрудников: лист на каждого, сводка по команде "
-                   "с формулами и графиками.")
+        st.caption("Excel с сохранёнными часами всех сотрудников (план и факт по всем неделям плана): "
+                   "лист на каждого, сводка по команде с формулами и графиками.")
         if st.button("Сформировать Excel"):
             people_data = {name: df for name, (df, _, _) in everyone.items()}
             norms = {name: norm for name, (_, norm, _) in everyone.items()}
