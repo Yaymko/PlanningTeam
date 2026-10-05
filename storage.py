@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core import DEFAULT_NORM, FIXED_COLS, merge_saved_hours, normalize_rows
+from core import DEFAULT_NORM, FIXED_COLS, hour_cols, merge_saved_hours, normalize_rows
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
 
@@ -65,14 +65,15 @@ def rows_to_json(df: pd.DataFrame, week_labels: list) -> str:
         rec = {col: row[col] for col in FIXED_COLS}
         rec["Срок"] = _date_to_str(rec["Срок"])
         rec["В работе"] = bool(rec["В работе"])
-        for wl in week_labels:
-            rec[wl] = float(row[wl])
+        for col in hour_cols(week_labels):
+            rec[col] = float(row[col])
         records.append(rec)
     return json.dumps(records, ensure_ascii=False)
 
 
 def rows_from_json(text: str, week_labels: list) -> pd.DataFrame:
-    df = pd.DataFrame(json.loads(text), columns=FIXED_COLS + list(week_labels))
+    # Строки, сохранённые до появления фактических часов, их не содержат — normalize_rows ставит 0.
+    df = pd.DataFrame(json.loads(text), columns=FIXED_COLS + hour_cols(week_labels))
     df["Срок"] = [date.fromisoformat(v) if isinstance(v, str) and v else None for v in df["Срок"]]
     return normalize_rows(df, week_labels)
 
