@@ -166,16 +166,17 @@ def _week_range(label: str, today: date):
 
 
 def nearest_weeks(week_labels: list, today: date, count: int = 2) -> list:
-    """Ближайшие недели плана: текущая и следующие (всего count).
+    """Ближайшие недели плана: прошлая и текущая (всего count) — чтобы в начале недели
+    можно было внести факт за прошедшую.
 
-    Если сегодня раньше всех недель — первые count, если позже всех — последние count.
-    Если даты из заголовков не читаются — все недели.
+    Если текущая неделя первая в плане — она и следующие; если сегодня раньше всех недель —
+    первые count, если позже всех — последние count. Если даты из заголовков не читаются — все недели.
     """
     ranges = [_week_range(wl, today) for wl in week_labels]
     if not week_labels or any(r is None for r in ranges):
         return list(week_labels)
-    start = next((i for i, (_, end) in enumerate(ranges) if end >= today), len(week_labels) - count)
-    start = max(0, min(start, len(week_labels) - count))
+    current = next((i for i, (_, end) in enumerate(ranges) if end >= today), len(week_labels))
+    start = max(0, min(current - (count - 1), len(week_labels) - count))
     return list(week_labels[start:start + count])
 
 

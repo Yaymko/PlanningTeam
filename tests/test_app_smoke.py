@@ -83,7 +83,7 @@ def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_pat
     at.selectbox[0].select("Иванов Иван").run()
     assert not at.exception
     labels = [m.label for m in at.metric]
-    assert labels == [f"План {weeks[1][:-2]}", f"План {weeks[2][:-2]}"]
+    assert labels == [f"План {weeks[0][:-2]}", f"План {weeks[1][:-2]}"]  # previous and current week
 
     next(b for b in at.button if b.label == "Сохранить").click().run()
     assert not at.exception

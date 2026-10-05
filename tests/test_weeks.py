@@ -10,9 +10,10 @@ from core import nearest_weeks  # noqa: E402
 WEEKS = ["28.09–04.10 ч", "05.10–11.10 ч", "12.10–18.10 ч", "19.10–25.10 ч"]
 
 
-def test_current_and_next_week():
-    assert nearest_weeks(WEEKS, date(2026, 10, 7)) == WEEKS[1:3]
-    assert nearest_weeks(WEEKS, date(2026, 10, 4)) == WEEKS[0:2]  # last day of the first week
+def test_previous_and_current_week():
+    assert nearest_weeks(WEEKS, date(2026, 10, 5)) == WEEKS[0:2]  # Monday: last week's actuals still visible
+    assert nearest_weeks(WEEKS, date(2026, 10, 14)) == WEEKS[1:3]
+    assert nearest_weeks(WEEKS, date(2026, 10, 2)) == WEEKS[0:2]  # first week of the plan: it and the next
 
 
 def test_before_and_after_the_plan():
@@ -23,8 +24,8 @@ def test_before_and_after_the_plan():
 
 def test_week_across_new_year():
     weeks = ["22.12–28.12 ч", "29.12–04.01 ч", "05.01–11.01 ч"]
-    assert nearest_weeks(weeks, date(2027, 1, 2)) == weeks[1:3]
-    assert nearest_weeks(weeks, date(2026, 12, 24)) == weeks[0:2]
+    assert nearest_weeks(weeks, date(2027, 1, 2)) == weeks[0:2]
+    assert nearest_weeks(weeks, date(2027, 1, 6)) == weeks[1:3]
 
 
 def test_unreadable_labels_show_everything():
