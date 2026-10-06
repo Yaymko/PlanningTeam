@@ -107,9 +107,9 @@ with tab_mine:
             }
             for wl in week_labels:
                 column_config[wl] = st.column_config.NumberColumn(
-                    f"{clean_week_label(wl)} план", min_value=0.0, step=0.5)
+                    f"{clean_week_label(wl)} план", min_value=0.0, step=0.01, format="%g")
                 column_config[actual_label(wl)] = st.column_config.NumberColumn(
-                    f"{clean_week_label(wl)} факт", min_value=0.0, step=0.5,
+                    f"{clean_week_label(wl)} факт", min_value=0.0, step=0.01, format="%g",
                     help="Сколько часов реально ушло на задачу за неделю. Заполняется в конце недели.")
 
             shown_weeks = visible_weeks(week_labels, key="all_weeks_mine")
@@ -203,7 +203,7 @@ with tab_planning:
             return styles
 
         styled = (summary.style.apply(highlight_overload, axis=1)
-                  .format(precision=1, subset=paired_cols)
+                  .format(precision=2, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
         st.dataframe(styled, use_container_width=True, hide_index=True)
 

@@ -137,3 +137,19 @@ def test_database_saved_before_actual_hours_still_loads(tmp_path):
     df.loc[0, actual_label(WEEKS[1])] = 3.5
     store.save_person("Иванов", df, norm)
     assert store.load_person("Иванов")[0].loc[0, actual_label(WEEKS[1])] == 3.5
+
+
+def test_hours_keep_hundredths(tmp_path):
+    from core import actual_label
+
+    path = tmp_path / "db.sqlite"
+    store = Store(path)
+    store.save_plan("board.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    df.loc[0, WEEKS[0]] = 0.75
+    df.loc[0, actual_label(WEEKS[0])] = 1.25
+    store.save_person("Иванов", df, 40)
+
+    df, _, _ = Store(path).load_person("Иванов")
+    assert df.loc[0, WEEKS[0]] == 0.75
+    assert df.loc[0, actual_label(WEEKS[0])] == 1.25
