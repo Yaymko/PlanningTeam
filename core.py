@@ -277,7 +277,7 @@ def build_export_workbook(people_data: dict, week_labels: list, norms: dict) -> 
                 cell = ws.cell(row=r, column=dst)
                 cell.value = f"='{name}'!{get_column_letter(src)}{tr}"
                 cell.font = LINK_FONT
-                cell.number_format = "0.#"
+                cell.number_format = "0.##"
         ws.cell(row=r, column=sum_total_col,
                 value=f"=SUM(C{r}:{get_column_letter(last_week_col)}{r})").font = BODY_FONT
         ws.cell(row=r, column=load_col,
