@@ -50,9 +50,15 @@ def parse_workbook(file_bytes: bytes):
 
     for name in person_sheets:
         ws = wb[name]
-        header = [c.value for c in ws[2]]
-        if "Тикет" not in header:
+        # Заголовок обычно во 2-й строке (над ним название листа), но в некоторых выгрузках
+        # строки с названием нет и заголовок стоит первым — ищем его в первых строках.
+        header_row = next(
+            (r for r in range(1, min(ws.max_row, 5) + 1) if ws.cell(row=r, column=1).value == "Тикет"),
+            None,
+        )
+        if header_row is None:
             continue
+        header = [c.value for c in ws[header_row]]
         idx = {h: i for i, h in enumerate(header) if h is not None}
         start_week_col = idx["В работе"] + 1
         end_week_col = idx.get("Итого, ч.", len(header) - 1)
@@ -61,10 +67,10 @@ def parse_workbook(file_bytes: bytes):
             week_labels = this_week_labels
 
         rows = []
-        for r in range(3, ws.max_row + 1):
+        for r in range(header_row + 1, ws.max_row + 1):
             a_val = ws.cell(row=r, column=1).value
             c_val = ws.cell(row=r, column=idx["Колонка"] + 1).value
-            if a_val == "Итого по неделям:":
+            if isinstance(a_val, str) and a_val.strip().startswith("Итого"):  # «Итого по неделям:» или «Итого»
                 break
             row = {
                 "Тикет": a_val or "",
