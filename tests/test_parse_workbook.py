@@ -67,3 +67,24 @@ def test_missing_week_columns_returns_empty_labels():
     people_data, week_labels = parse_workbook(buf.getvalue())
     assert week_labels == []
     assert people_data == {}
+
+
+def test_parses_sheets_without_title_row_and_short_totals_label():
+    """Выгрузка, где заголовок стоит в первой строке, а итоговая строка подписана просто «Итого»."""
+    labels = ["05.10–11.10 ч", "12.10–18.10 ч"]
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Петров Пётр Петрович")
+    ws.append(["Тикет", "Название", "Колонка", "Доска", "Срок", "В работе", *labels, "Итого, ч."])
+    ws.append(["ABC-2", "Другая штука", "10 Работа", "1743", None, True, 3, None, None])
+    ws.append([None, None, "Доп. работа", None, None, None, None, None, None])
+    ws.append(["Итого", None, None, None, None, None, "=SUM(G2:G3)", "=SUM(H2:H3)", None])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    people_data, week_labels = parse_workbook(buf.getvalue())
+
+    assert week_labels == labels
+    df = people_data["Петров Пётр Петрович"]
+    assert list(df["Тикет"]) == ["ABC-2", ""]
+    assert df.iloc[0][labels[0]] == 3.0
