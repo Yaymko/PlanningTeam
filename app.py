@@ -55,7 +55,7 @@ if plan:
     weeks = ", ".join(clean_week_label(w) for w in plan["week_labels"])
     st.caption(f"План недели: {plan['file_name']} (загружен {fmt_saved(plan['uploaded_at'])}). Недели: {weeks}")
 
-tab_mine, tab_planning = st.tabs(["Мои часы", "Планирование"])
+tab_mine, tab_planning, tab_history = st.tabs(["Мои часы", "Планирование", "История"])
 
 # --- Мои часы: каждый сотрудник заполняет и сохраняет свои часы ------------------------
 with tab_mine:
@@ -152,7 +152,8 @@ with tab_mine:
 with tab_planning:
     with st.expander("Загрузить выгрузку с доски на новую неделю", expanded=not plan):
         st.caption("Файл становится планом недели для всей команды. Уже введённые часы по совпадающим "
-                   "тикетам и неделям сохраняются, отметки «заполнено» сбрасываются, если недели в файле новые.")
+                   "тикетам и неделям сохраняются, отметки «заполнено» сбрасываются, если недели в файле новые. "
+                   "Недели, которых нет в новом файле, со всеми часами переходят во вкладку «История».")
         uploaded = st.file_uploader("Еженедельный экспорт с Agile-доски (.xlsx)", type="xlsx")
         if uploaded and st.button("Сделать планом недели"):
             people_data, week_labels = parse_workbook(uploaded.getvalue())
@@ -247,3 +248,45 @@ with tab_planning:
                 file_name=f"Загрузка_команды_{datetime.now(timezone.utc):%Y-%m-%d}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
+# --- История: прошедшие недели, ушедшие из плана при загрузке новой выгрузки -------------
+with tab_history:
+    past_weeks = store.history_weeks()
+    if not past_weeks:
+        st.info("История пока пустая. Когда загружается выгрузка с доски, недели, которых в ней уже нет, "
+                "попадают сюда со всеми часами (план и факт).")
+    else:
+        chosen = st.selectbox("Неделя", past_weeks, format_func=lambda w: clean_week_label(w["label"]),
+                              key="history_week")
+        label, people = store.load_history_week(chosen["key"])
+        st.caption(f"Из плана {chosen['file_name']}, в истории с {fmt_saved(chosen['archived_at'])}.")
+
+        hist_rows = [{"Сотрудник": name, "Сохранено": fmt_saved(saved_at), "Норма, ч/нед": norm,
+                      "План, ч": df[label].sum(), "Факт, ч": df[actual_label(label)].sum()}
+                     for name, (df, norm, saved_at) in people.items()]
+        hist = pd.DataFrame(hist_rows)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("План команды", f"{hist['План, ч'].sum():g} ч")
+        c2.metric("Факт команды", f"{hist['Факт, ч'].sum():g} ч")
+        c3.metric("Норма команды", f"{hist['Норма, ч/нед'].sum():g} ч")
+        st.dataframe(hist.style.format(precision=2, subset=["План, ч", "Факт, ч"])
+                     .format("{:g}", subset=["Норма, ч/нед"]),
+                     use_container_width=True, hide_index=True)
+
+        for name, (df, _, _) in people.items():
+            with st.expander(f"{name}: тикеты"):
+                if df.empty:
+                    st.caption("Часов на эту неделю не было.")
+                else:
+                    df = df.assign(Срок=pd.to_datetime(df["Срок"]))
+                    st.dataframe(df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"}),
+                                 use_container_width=True, hide_index=True,
+                                 column_config={"Срок": st.column_config.DateColumn(format="DD.MM.YYYY")})
+
+        st.download_button(
+            "Скачать Excel за эту неделю",
+            data=build_export_workbook({n: df for n, (df, _, _) in people.items()}, [label],
+                                       {n: norm for n, (_, norm, _) in people.items()}),
+            file_name=f"Загрузка_команды_{chosen['key']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )

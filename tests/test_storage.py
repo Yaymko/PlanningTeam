@@ -153,3 +153,53 @@ def test_hours_keep_hundredths(tmp_path):
     df, _, _ = Store(path).load_person("Иванов")
     assert df.loc[0, WEEKS[0]] == 0.75
     assert df.loc[0, actual_label(WEEKS[0])] == 1.25
+
+
+def test_dropped_weeks_go_to_history(tmp_path):
+    from core import actual_label
+
+    path = tmp_path / "db.sqlite"
+    store = Store(path)
+    rows = [_ticket("A-1", WEEKS, [5, 7]), _ticket("B-2", WEEKS, [0, 2])]
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, rows), "Петрова": _df(WEEKS, rows[:1])}, WEEKS,
+                    today=date(2026, 10, 1))
+    df, _, _ = store.load_person("Иванов")
+    df.loc[0, actual_label(WEEKS[0])] = 6.0
+    store.save_person("Иванов", df, 32)
+    assert store.history_weeks() == []
+
+    new = _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0])])
+    store.save_plan("w2.xlsx", {"Иванов": new}, NEXT_WEEKS, today=date(2026, 10, 8))
+
+    store = Store(path)  # "restart"
+    weeks = store.history_weeks()
+    assert [(w["key"], w["label"], w["file_name"]) for w in weeks] == [("2026-09-28", WEEKS[0], "w1.xlsx")]
+    label, people = store.load_history_week("2026-09-28")
+    assert label == WEEKS[0] and list(people) == ["Иванов", "Петрова"]
+    df, norm, saved_at = people["Иванов"]
+    assert list(df["Тикет"]) == ["A-1"]  # tickets without hours that week are not kept
+    assert df.loc[0, WEEKS[0]] == 5.0 and df.loc[0, actual_label(WEEKS[0])] == 6.0
+    assert norm == 32.0 and saved_at
+    assert people["Петрова"][0].loc[0, WEEKS[0]] == 5.0  # not in the new export, history kept anyway
+
+
+def test_week_back_in_export_is_restored_from_history(tmp_path):
+    from core import actual_label
+
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [5, 7])])}, WEEKS,
+                    today=date(2026, 10, 1))
+    df, _, _ = store.load_person("Иванов")
+    df.loc[0, actual_label(WEEKS[0])] = 6.0
+    store.save_person("Иванов", df, 40)
+    store.save_plan("w2.xlsx", {"Иванов": _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0])])}, NEXT_WEEKS,
+                    today=date(2026, 10, 8))
+    assert len(store.history_weeks()) == 1
+
+    # The old export loaded again by mistake: week 28.09 comes back with its hours.
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS,
+                    today=date(2026, 10, 8))
+    df, _, _ = store.load_person("Иванов")
+    assert df.loc[0, WEEKS[0]] == 5.0 and df.loc[0, actual_label(WEEKS[0])] == 6.0
+    assert df.loc[0, WEEKS[1]] == 7.0
+    assert [w["label"] for w in store.history_weeks()] == ["12.10–18.10 ч"]

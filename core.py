@@ -171,6 +171,13 @@ def _week_range(label: str, today: date):
     return best
 
 
+def week_key(label: str, today: date) -> str:
+    """Ключ недели для истории: дата начала (YYYY-MM-DD), чтобы недели разных лет не путались.
+    Если дату из заголовка не прочитать — сам заголовок."""
+    rng = _week_range(label, today)
+    return rng[0].isoformat() if rng else clean_week_label(label)
+
+
 def nearest_weeks(week_labels: list, today: date, count: int = 2) -> list:
     """Ближайшие недели плана: прошлая и текущая (всего count) — чтобы в начале недели
     можно было внести факт за прошедшую.
