@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from core import DEFAULT_NORM, FIXED_COLS, hour_cols, merge_saved_hours, normalize_rows
+from core import DEFAULT_NORM, FIXED_COLS, actual_label, hour_cols, merge_saved_hours, normalize_rows, week_key
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
 
@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS people (
     rows       TEXT NOT NULL,
     norm       REAL NOT NULL,
     updated_at TEXT
+);
+-- Прошедшие недели, которые ушли из плана при загрузке новой выгрузки: часы каждого сотрудника
+-- (план и факт) за одну неделю, норма и когда сотрудник сохранял.
+CREATE TABLE IF NOT EXISTS week_history (
+    week_key    TEXT NOT NULL,
+    week_label  TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    rows        TEXT NOT NULL,
+    norm        REAL NOT NULL,
+    updated_at  TEXT,
+    file_name   TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    PRIMARY KEY (week_key, name)
 );
 """
 
@@ -99,28 +113,55 @@ class Store:
             return None
         return {"file_name": row[0], "uploaded_at": row[1], "week_labels": json.loads(row[2])}
 
-    def save_plan(self, file_name: str, people_data: dict, week_labels: list) -> None:
+    def save_plan(self, file_name: str, people_data: dict, week_labels: list, today: date = None) -> None:
         """Делает свежую выгрузку с доски планом недели.
 
         Уже введённые часы по совпадающим тикетам и неделям переносятся, нормы сохраняются.
         Если набор недель поменялся (новая неделя), отметки «заполнено» сбрасываются.
+        Недели, которых нет в новой выгрузке, уходят в историю; если неделя из истории снова
+        появилась в выгрузке, её часы возвращаются в план.
         """
+        today = today or date.today()
         old_plan = self.get_plan()
         old_weeks = old_plan["week_labels"] if old_plan else []
         same_weeks = list(old_weeks) == list(week_labels)
+        dropped = [wl for wl in old_weeks if wl not in week_labels]
+        returned = {week_key(wl, today): wl for wl in week_labels if wl not in old_weeks}
         with closing(self._connect()) as conn, conn:
             old = {
-                name: (rows, norm, updated_at)
-                for name, rows, norm, updated_at in conn.execute(
-                    "SELECT name, rows, norm, updated_at FROM people")
+                name: (rows, norm, updated_at, position)
+                for name, rows, norm, updated_at, position in conn.execute(
+                    "SELECT name, rows, norm, updated_at, position FROM people")
             }
+            for name, (old_rows, norm, updated_at, position) in old.items():
+                old_df = rows_from_json(old_rows, old_weeks)
+                for wl in dropped:
+                    week_df = old_df[FIXED_COLS + hour_cols([wl])]
+                    week_df = week_df[(week_df[wl] != 0) | (week_df[actual_label(wl)] != 0)]
+                    conn.execute(
+                        "INSERT OR REPLACE INTO week_history (week_key, week_label, name, position, rows, norm, "
+                        "updated_at, file_name, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (week_key(wl, today), wl, name, position, rows_to_json(week_df, [wl]), norm,
+                         updated_at, old_plan["file_name"], _now()))
+            history = {}
+            if returned:
+                marks = ",".join("?" * len(returned))
+                for key, name, rows, label in conn.execute(
+                        f"SELECT week_key, name, rows, week_label FROM week_history WHERE week_key IN ({marks})",
+                        list(returned)):
+                    history.setdefault(name, []).append(
+                        rows_from_json(rows, [label]).rename(columns={
+                            label: returned[key], actual_label(label): actual_label(returned[key])}))
+                conn.execute(f"DELETE FROM week_history WHERE week_key IN ({marks})", list(returned))
             conn.execute("DELETE FROM people")
             for position, (name, df) in enumerate(people_data.items()):
                 norm, updated_at = DEFAULT_NORM, None
                 if name in old:
-                    old_rows, norm, old_updated = old[name]
+                    old_rows, norm, old_updated, _ = old[name]
                     df = merge_saved_hours(df, rows_from_json(old_rows, old_weeks), week_labels)
                     updated_at = old_updated if same_weeks else None
+                for hist_df in history.get(name, []):
+                    df = merge_saved_hours(df, hist_df, week_labels)
                 conn.execute(
                     "INSERT INTO people (name, position, rows, norm, updated_at) VALUES (?, ?, ?, ?, ?)",
                     (name, position, rows_to_json(df, week_labels), norm, updated_at))
@@ -162,3 +203,24 @@ class Store:
                 (rows_to_json(df, plan["week_labels"]), float(norm), _now(), name))
             if cur.rowcount == 0:
                 raise KeyError(name)
+
+    # --- история прошедших недель ----------------------------------------------------
+
+    def history_weeks(self) -> list:
+        """Недели в истории, новые первыми: [{'key', 'label', 'file_name', 'archived_at'}]."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT week_key, MAX(week_label), MAX(file_name), MAX(archived_at) FROM week_history "
+                "GROUP BY week_key ORDER BY week_key DESC").fetchall()
+        return [{"key": k, "label": lbl, "file_name": f, "archived_at": a} for k, lbl, f, a in rows]
+
+    def load_history_week(self, key: str) -> tuple:
+        """(заголовок недели, {имя: (таблица тикетов, норма, когда сохранено)}) для недели из истории."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT week_label, name, rows, norm, updated_at FROM week_history WHERE week_key = ? "
+                "ORDER BY position, name", (key,)).fetchall()
+        if not rows:
+            raise KeyError(key)
+        label = rows[0][0]
+        return label, {name: (rows_from_json(r, [label]), norm, upd) for _, name, r, norm, upd in rows}

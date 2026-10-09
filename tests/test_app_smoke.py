@@ -94,3 +94,27 @@ def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_pat
     at.toggle(key="all_weeks_mine").set_value(True).run()
     assert not at.exception
     assert len(at.metric) == 4
+
+
+def test_history_tab_shows_past_week(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    next_weeks = [WEEK_LABELS[1], "12.10–18.10 ч"]
+    df = pd.DataFrame(columns=FIXED_COLS + next_weeks)
+    store.save_plan("board2.xlsx", {"Иванов Иван": df, "Петрова Анна": df.copy()}, next_weeks)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    assert at.selectbox(key="history_week").value["label"] == WEEK_LABELS[0]
+    assert any(m.label == "План команды" and m.value == "8 ч" for m in at.metric)
+
+
+def test_history_tab_empty(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    assert any("История пока пустая" in info.value for info in at.info)
