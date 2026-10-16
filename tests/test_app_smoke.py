@@ -118,3 +118,47 @@ def test_history_tab_empty(monkeypatch, tmp_path):
     at.run()
     assert not at.exception
     assert any("История пока пустая" in info.value for info in at.info)
+
+
+def _two_ticket_people():
+    rows = [{"Тикет": t, "Название": n, "Колонка": "10 Работа", "Доска": "1267", "Срок": None, "В работе": True,
+             WEEK_LABELS[0]: h, WEEK_LABELS[1]: 0.0}
+            for t, n, h in [("ABC-1", "Сделать штуку", 4.0), ("ABC-2", "Починить импорт", 2.0)]]
+    df = pd.DataFrame(rows, columns=FIXED_COLS + WEEK_LABELS)
+    return {"Иванов Иван": df, "Петрова Анна": df.copy()}
+
+
+def test_search_in_my_hours_keeps_hidden_rows_on_save(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _two_ticket_people(), WEEK_LABELS)
+    at = _app(monkeypatch, db)
+    at.run()
+    at.selectbox[0].select("Иванов Иван").run()
+    search = next(t for t in at.text_input if t.key.startswith("filter_editor_") and t.key.endswith("_search"))
+    search.input("импорт").run()
+    assert not at.exception
+    assert any("Показано строк: 1 из 2" in c.value for c in at.caption)
+    assert at.metric[0].value == "6 ч"  # totals count all rows, not only the shown ones
+    assert not any("Отмечено к удалению" in c.value for c in at.caption)
+
+    next(b for b in at.button if b.label == "Сохранить").click().run()
+    assert not at.exception
+    df, _, saved_at = Store(db).load_person("Иванов Иван")
+    assert saved_at
+    assert df["Тикет"].tolist() == ["ABC-1", "ABC-2"]
+
+
+def test_search_and_column_filter_in_planning_summary(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _two_ticket_people(), WEEK_LABELS)
+    at = _app(monkeypatch, db)
+    at.run()
+    at.text_input(key="filter_planning_summary_search").input("петрова").run()
+    assert not at.exception
+    assert any("Показано строк: 1 из 2" in c.value for c in at.caption)
+
+    at.text_input(key="filter_planning_summary_search").input("").run()
+    at.multiselect(key="filter_planning_summary_cols").select("Сотрудник").run()
+    at.multiselect(key="filter_planning_summary_f_Сотрудник").select("Иванов Иван").run()
+    assert not at.exception
+    assert any("Показано строк: 1 из 2" in c.value for c in at.caption)

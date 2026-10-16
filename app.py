@@ -24,8 +24,11 @@ from core import (
     parse_workbook,
 )
 from storage import Store, db_path_from_env
+from table_filter import apply_filter, filter_controls, filter_table, merge_view_edits
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
+
+ROW_ID = "_row_id"  # hidden row id that ties edits in a filtered editor back to the full table
 
 
 @st.cache_resource(show_spinner=False)
@@ -115,11 +118,35 @@ with tab_mine:
             shown_weeks = visible_weeks(week_labels, key="all_weeks_mine")
             # Hidden weeks stay in the data (column_order only hides them), so saving keeps their hours.
             column_order = [DELETE_COL, *FIXED_COLS, *hour_cols(shown_weeks)]
-            edited = st.data_editor(base_df, column_config=column_config, column_order=column_order,
+
+            # Search and filters show part of the rows in the editor. The editor's baseline must stay
+            # fixed while the filter is unchanged, so edits are merged into the full table every run and
+            # that merged table becomes the new baseline only when the filter changes (new editor key).
+            works = st.session_state.setdefault("filter_works", {})
+            if editor_key not in works:
+                works[editor_key] = {"full": base_df.assign(**{ROW_ID: range(len(base_df))}),
+                                     "spec": None, "merged": None, "gen": 0, "carried": False,
+                                     "view_dirty": False}
+            work = works[editor_key]
+            labels = {c: column_config[c]["label"] for c in hour_cols(shown_weeks)}
+            spec = filter_controls(work["full"], key=f"filter_{editor_key}", columns=column_order[1:],
+                                   labels=labels)
+            if spec != work["spec"]:
+                if work["merged"] is not None:
+                    work["carried"] = work["carried"] or work["view_dirty"]
+                    work["full"] = work["merged"]
+                work["spec"], work["gen"] = spec, work["gen"] + 1
+            view = apply_filter(work["full"], spec)
+            if len(view) != len(work["full"]):
+                st.caption(f"Показано строк: {len(view)} из {len(work['full'])}. Правки в скрытых фильтром "
+                           "строках не теряются, итоги ниже — по всем строкам.")
+            view_key = f"{editor_key}_view{work['gen']}"
+            edited = st.data_editor(view, column_config=column_config, column_order=column_order,
                                     hide_index=True, use_container_width=True, num_rows="dynamic",
-                                    key=editor_key)
-            kept = drop_marked_rows(edited)
-            marked = len(edited) - len(kept)
+                                    key=view_key)
+            work["merged"] = merge_view_edits(work["full"], view, edited, ROW_ID)
+            kept = drop_marked_rows(work["merged"]).drop(columns=ROW_ID)
+            marked = len(work["merged"]) - len(kept)
             if marked:
                 st.caption(f":red[Отмечено к удалению строк: {marked}. Они удалятся при сохранении "
                            "и уже не учитываются в итогах ниже.]")
@@ -135,9 +162,9 @@ with tab_mine:
                            delta_color="inverse" if delta > 0 else "off")
                 col.caption(f"Факт: {actual:g} ч")
 
-            editor_state = st.session_state.get(editor_key, {})
-            dirty = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows")) \
-                or norm_val != float(saved_norm)
+            editor_state = st.session_state.get(view_key, {})
+            work["view_dirty"] = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows"))
+            dirty = work["view_dirty"] or work["carried"] or norm_val != float(saved_norm)
             if dirty:
                 st.caption(":orange[Есть несохранённые изменения.]")
 
@@ -145,6 +172,7 @@ with tab_mine:
                 store.save_person(selected, kept, norm_val)
                 versions[selected] = ver + 1
                 baselines.pop(editor_key, None)
+                works.pop(editor_key, None)
                 st.toast("Часы сохранены")
                 st.rerun()
 
@@ -203,7 +231,8 @@ with tab_planning:
                     styles.append("")
             return styles
 
-        styled = (summary.style.apply(highlight_overload, axis=1)
+        shown_summary = filter_table(summary, key="filter_planning_summary")
+        styled = (shown_summary.style.apply(highlight_overload, axis=1)
                   .format(precision=2, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
         st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -269,7 +298,8 @@ with tab_history:
         c1.metric("План команды", f"{hist['План, ч'].sum():g} ч")
         c2.metric("Факт команды", f"{hist['Факт, ч'].sum():g} ч")
         c3.metric("Норма команды", f"{hist['Норма, ч/нед'].sum():g} ч")
-        st.dataframe(hist.style.format(precision=2, subset=["План, ч", "Факт, ч"])
+        shown_hist = filter_table(hist, key=f"filter_history_{chosen['key']}")
+        st.dataframe(shown_hist.style.format(precision=2, subset=["План, ч", "Факт, ч"])
                      .format("{:g}", subset=["Норма, ч/нед"]),
                      use_container_width=True, hide_index=True)
 
@@ -279,7 +309,8 @@ with tab_history:
                     st.caption("Часов на эту неделю не было.")
                 else:
                     df = df.assign(Срок=pd.to_datetime(df["Срок"]))
-                    st.dataframe(df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"}),
+                    df = df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"})
+                    st.dataframe(filter_table(df, key=f"filter_history_{chosen['key']}_{name}"),
                                  use_container_width=True, hide_index=True,
                                  column_config={"Срок": st.column_config.DateColumn(format="DD.MM.YYYY")})
 
