@@ -19,7 +19,7 @@ WEEK_LABELS = ["28.09–04.10 ч", "05.10–11.10 ч"]
 def _plan_people():
     df = pd.DataFrame(
         [{"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
-          "Срок": None, "В работе": True, WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 0.0}],
+          "Срок": None, "В работе": True, WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 6.0}],
         columns=FIXED_COLS + WEEK_LABELS,
     )
     return {"Иванов Иван": df, "Петрова Анна": df.copy()}
@@ -57,6 +57,24 @@ def test_employee_saves_hours_and_planning_sees_them(monkeypatch, tmp_path):
     assert norm == 32.0
     assert saved_at
     assert any("Ещё не заполнили: Петрова Анна" in w.value for w in at.warning)
+
+
+def test_saved_with_zero_planned_hours_counts_as_not_filled(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    df, _, _ = store.load_person("Иванов Иван")
+    store.save_person("Иванов Иван", df.iloc[0:0], 40)  # deleted every row, no hours entered yet
+    df, _, _ = store.load_person("Петрова Анна")
+    df.loc[0, WEEK_LABELS[1]] = 0.0
+    store.save_person("Петрова Анна", df, 40)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    week1, week2 = (w[:-2] for w in WEEK_LABELS)
+    assert any(f"Заполнили часы: 0 из 2. Ещё не заполнили: Иванов Иван (0 ч на {week1}, {week2}), "
+               f"Петрова Анна (0 ч на {week2})" in w.value for w in at.warning)
 
 
 def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_path):
@@ -120,6 +138,34 @@ def test_history_tab_empty(monkeypatch, tmp_path):
     assert any("История пока пустая" in info.value for info in at.info)
 
 
+def test_plan_vs_fact_tab(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+
+    from fact import FACT_COLS
+
+    monday = date.today() - timedelta(days=date.today().weekday())
+    week = f"{monday:%d.%m}–{monday + timedelta(days=6):%d.%m} ч"
+    row = {"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
+           "Срок": None, "В работе": True, week: 10.0}
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", {"Иванов Иван": pd.DataFrame([row])}, [week])
+    fact = pd.DataFrame([{"Дата": monday, "Сотрудник": "Иванов Иван Петрович", "Проект": "ОГВ",
+                          "Вид затрат": "Инвестиции", "Часы": 12.0, "Примечание": "фича"}],
+                        columns=FACT_COLS).fillna("")
+    store.save_fact("fact.xlsx", fact)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["Факт команды"] == "12 ч"
+    assert metrics["Факт / план"] == "120%"
+
+    at.selectbox(key="fact_group_by").select("Вид затрат").run()
+    assert not at.exception
+
+
 def _two_ticket_people():
     rows = [{"Тикет": t, "Название": n, "Колонка": "10 Работа", "Доска": "1267", "Срок": None, "В работе": True,
              WEEK_LABELS[0]: h, WEEK_LABELS[1]: 0.0}
@@ -162,3 +208,28 @@ def test_search_and_column_filter_in_planning_summary(monkeypatch, tmp_path):
     at.multiselect(key="filter_planning_summary_f_Сотрудник").select("Иванов Иван").run()
     assert not at.exception
     assert any("Показано строк: 1 из 2" in c.value for c in at.caption)
+
+
+
+
+def test_history_tab_shows_fact_from_time_tracking(monkeypatch, tmp_path):
+    from datetime import date
+
+    from fact import FACT_COLS
+
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    next_weeks = [WEEK_LABELS[1], "12.10–18.10 ч"]
+    df = pd.DataFrame(columns=FIXED_COLS + next_weeks)
+    store.save_plan("board2.xlsx", {"Иванов Иван": df, "Петрова Анна": df.copy()}, next_weeks)
+    key = store.history_weeks()[0]["key"]
+    fact = pd.DataFrame([{"Дата": date.fromisoformat(key), "Сотрудник": "Иванов Иван Петрович",
+                          "Этап внутреннего плана": "Разработка", "Часы": 5.0, "Примечание": "фича"}],
+                        columns=FACT_COLS).fillna("")
+    store.save_fact("fact.xlsx", fact)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    assert any(m.label == "Факт по отметке" and m.value == "5 ч" for m in at.metric)
