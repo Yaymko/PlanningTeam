@@ -276,16 +276,35 @@ with tab_history:
                       "План, ч": df[label].sum(), "Факт, ч": df[actual_label(label)].sum()}
                      for name, (df, norm, saved_at) in people.items()]
         hist = pd.DataFrame(hist_rows)
-        c1, c2, c3 = st.columns(3)
+        # Фактическая отметка из учёта времени за эту неделю, если её загружали во вкладке «План vs факт».
+        try:
+            hist_fact = store.load_fact(chosen["key"])
+        except KeyError:
+            hist_fact = None
+        hist_hour_cols = ["План, ч", "Факт, ч"]
+        if hist_fact is not None:
+            hist_cmp, hist_fact = compare_plan_fact(people, label, hist_fact)
+            fact_by_name = hist_cmp.set_index("Сотрудник")["Факт по отметке, ч"]
+            hist["Факт по отметке, ч"] = hist["Сотрудник"].map(fact_by_name).fillna(0.0)
+            hist["Отклонение, ч"] = (hist["Факт по отметке, ч"] - hist["План, ч"]).round(2)
+            hist_hour_cols += ["Факт по отметке, ч", "Отклонение, ч"]
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("План команды", f"{hist['План, ч'].sum():g} ч")
         c2.metric("Факт команды", f"{hist['Факт, ч'].sum():g} ч")
-        c3.metric("Норма команды", f"{hist['Норма, ч/нед'].sum():g} ч")
-        st.dataframe(hist.style.format(precision=2, subset=["План, ч", "Факт, ч"])
+        c3.metric("Факт по отметке", f"{hist_fact['Часы'].sum():g} ч" if hist_fact is not None else "—")
+        c4.metric("Норма команды", f"{hist['Норма, ч/нед'].sum():g} ч")
+        if hist_fact is None:
+            st.caption("Фактическую отметку за эту неделю не загружали. Её можно загрузить во вкладке «План vs факт».")
+        else:
+            only_fact = sorted(set(hist_fact["Сотрудник"]) - set(people))
+            if only_fact:
+                st.caption("Есть в отметке, но не было в плане: " + ", ".join(only_fact))
+        st.dataframe(hist.style.format(precision=2, subset=hist_hour_cols)
                      .format("{:g}", subset=["Норма, ч/нед"]),
                      use_container_width=True, hide_index=True)
 
         for name, (df, _, _) in people.items():
-            with st.expander(f"{name}: тикеты"):
+            with st.expander(f"{name}: тикеты" + (" и факт по отметке" if hist_fact is not None else "")):
                 if df.empty:
                     st.caption("Часов на эту неделю не было.")
                 else:
@@ -293,6 +312,15 @@ with tab_history:
                     st.dataframe(df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"}),
                                  use_container_width=True, hide_index=True,
                                  column_config={"Срок": st.column_config.DateColumn(format="DD.MM.YYYY")})
+                if hist_fact is not None:
+                    mine = hist_fact[hist_fact["Сотрудник"] == name]
+                    st.markdown(f"**Факт по отметке: {GROUP_COLS[0]}**")
+                    if mine.empty:
+                        st.caption("Отметок за эту неделю нет.")
+                    else:
+                        st.dataframe(fact_breakdown(mine, GROUP_COLS[0]), use_container_width=True, hide_index=True,
+                                     column_config={"Доля": st.column_config.NumberColumn(format="percent"),
+                                                    "Часы": st.column_config.NumberColumn(format="%.2f")})
 
         st.download_button(
             "Скачать Excel за эту неделю",

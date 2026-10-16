@@ -146,3 +146,26 @@ def test_plan_vs_fact_tab(monkeypatch, tmp_path):
 
     at.selectbox(key="fact_group_by").select("Вид затрат").run()
     assert not at.exception
+
+
+def test_history_tab_shows_fact_from_time_tracking(monkeypatch, tmp_path):
+    from datetime import date
+
+    from fact import FACT_COLS
+
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    next_weeks = [WEEK_LABELS[1], "12.10–18.10 ч"]
+    df = pd.DataFrame(columns=FIXED_COLS + next_weeks)
+    store.save_plan("board2.xlsx", {"Иванов Иван": df, "Петрова Анна": df.copy()}, next_weeks)
+    key = store.history_weeks()[0]["key"]
+    fact = pd.DataFrame([{"Дата": date.fromisoformat(key), "Сотрудник": "Иванов Иван Петрович",
+                          "Этап внутреннего плана": "Разработка", "Часы": 5.0, "Примечание": "фича"}],
+                        columns=FACT_COLS).fillna("")
+    store.save_fact("fact.xlsx", fact)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    assert any(m.label == "Факт по отметке" and m.value == "5 ч" for m in at.metric)
