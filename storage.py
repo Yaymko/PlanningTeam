@@ -13,7 +13,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from core import DEFAULT_NORM, FIXED_COLS, actual_label, hour_cols, merge_saved_hours, normalize_rows, week_key
+from core import (
+    DEFAULT_NORM,
+    FIXED_COLS,
+    actual_label,
+    hour_cols,
+    merge_saved_hours,
+    normalize_rows,
+    week_key,
+)
 from fact import DATE_COL, FACT_COLS, plan_week_label, split_by_week
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
