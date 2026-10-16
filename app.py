@@ -23,6 +23,17 @@ from core import (
     nearest_weeks,
     parse_workbook,
 )
+from fact import (
+    DATE_COL,
+    GROUP_COLS,
+    HOURS_COL,
+    build_comparison_workbook,
+    compare_plan_fact,
+    deviation_level,
+    fact_breakdown,
+    parse_fact_workbook,
+    week_title,
+)
 from storage import Store, db_path_from_env
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
@@ -55,7 +66,7 @@ if plan:
     weeks = ", ".join(clean_week_label(w) for w in plan["week_labels"])
     st.caption(f"План недели: {plan['file_name']} (загружен {fmt_saved(plan['uploaded_at'])}). Недели: {weeks}")
 
-tab_mine, tab_planning, tab_history = st.tabs(["Мои часы", "Планирование", "История"])
+tab_mine, tab_planning, tab_history, tab_fact = st.tabs(["Мои часы", "Планирование", "История", "План vs факт"])
 
 # --- Мои часы: каждый сотрудник заполняет и сохраняет свои часы ------------------------
 with tab_mine:
@@ -288,5 +299,127 @@ with tab_history:
             data=build_export_workbook({n: df for n, (df, _, _) in people.items()}, [label],
                                        {n: norm for n, (_, norm, _) in people.items()}),
             file_name=f"Загрузка_команды_{chosen['key']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+# --- План vs факт: плановые часы недели против фактической отметки из учёта времени ------
+with tab_fact:
+    with st.expander("Загрузить фактическую отметку", expanded=not store.fact_weeks()):
+        st.caption("Выгрузка из учёта рабочего времени («Сводная таблица по выполненным работам», .xlsx): "
+                   "строка на сотрудника, день и работу с колонками «Дата», «Фамилия И.О.», «Часы», «Проект» "
+                   "и др. Часы раскладываются по неделям; недели из файла заменяют ранее загруженный факт за них.")
+        fact_file = st.file_uploader("Выгрузка факта (.xlsx)", type="xlsx", key="fact_upload")
+        if fact_file and st.button("Загрузить факт"):
+            fact_rows = parse_fact_workbook(fact_file.getvalue())
+            if fact_rows.empty:
+                st.error("Не нашлось строк с часами. Нужны колонки «Дата», «Фамилия И.О.» и «Часы».")
+            else:
+                keys = store.save_fact(fact_file.name, fact_rows)
+                st.session_state["fact_week"] = max(keys)
+                st.rerun()
+
+    fact_weeks = store.fact_weeks()
+    if not fact_weeks:
+        st.info("Загрузите выгрузку фактической отметки, чтобы сравнить её с планом команды за неделю.")
+    else:
+        week_keys = [w["key"] for w in fact_weeks]
+        if st.session_state.get("fact_week") not in week_keys:
+            st.session_state["fact_week"] = week_keys[0]
+        key = st.selectbox("Неделя", week_keys, format_func=week_title, key="fact_week")
+        info = next(w for w in fact_weeks if w["key"] == key)
+        fact_rows = store.load_fact(key)
+        label, plan_people = store.plan_for_week(key)
+        days = sorted(fact_rows[DATE_COL].unique())
+        st.caption(f"Факт из {info['file_name']} (загружен {fmt_saved(info['uploaded_at'])}), "
+                   f"дни с отметками: {days[0]:%d.%m}–{days[-1]:%d.%m} ({len(days)} дн.).")
+        if not label:
+            st.warning(f"Плана на неделю {week_title(key)} нет ни в текущем плане, ни в истории: "
+                       "видно только, куда ушли часы.")
+
+        summary, fact_rows = compare_plan_fact(plan_people, label, fact_rows)
+        team_plan, team_fact = summary["План, ч"].sum(), summary["Факт по отметке, ч"].sum()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("План команды", f"{team_plan:g} ч")
+        c2.metric("Факт команды", f"{team_fact:g} ч", f"{team_fact - team_plan:+g} ч к плану", delta_color="off")
+        c3.metric("Факт / план", f"{team_fact / team_plan:.0%}" if team_plan else "—")
+        c4.metric("Норма команды", f"{summary['Норма, ч'].sum():g} ч")
+
+        only_fact = summary.loc[summary["Норма, ч"].isna(), "Сотрудник"].tolist()
+        no_fact = summary.loc[summary["Норма, ч"].notna() & (summary["Факт по отметке, ч"] == 0), "Сотрудник"]
+        if only_fact:
+            st.warning("Есть в отметке, но нет в планировщике: " + ", ".join(only_fact))
+        if not no_fact.empty:
+            st.warning("Нет фактической отметки за неделю: " + ", ".join(no_fact))
+
+        st.subheader("План и факт по сотрудникам")
+        st.caption("«Факт по отметке» — из загруженной выгрузки, «Факт в планировщике» — что сотрудник сам вписал "
+                   "в колонку «факт» во вкладке «Мои часы». Подсветка отклонения отметки от плана: "
+                   "зелёный — до 10%, жёлтый — до 25%, красный — больше или план не заполнен.")
+        colors = {"ok": "#D9EAD3", "warn": "#FFF2CC", "bad": "#F4CCCC"}
+
+        def highlight_deviation(row):
+            color = colors[deviation_level(row["План, ч"], row["Факт по отметке, ч"])]
+            return [f"background-color:{color}" if c in ("Отклонение, ч", "Факт / план") else ""
+                    for c in summary.columns]
+
+        hour_fmt = ["План, ч", "Факт в планировщике, ч", "Факт по отметке, ч"]
+        st.dataframe(summary.style.apply(highlight_deviation, axis=1)
+                     .format(precision=2, subset=hour_fmt)
+                     .format("{:+.2f}", subset=["Отклонение, ч"])
+                     .format("{:.0%}", subset=["Факт / план"], na_rep="—")
+                     .format("{:g}", subset=["Норма, ч"], na_rep="—"),
+                     use_container_width=True, hide_index=True)
+
+        group_by = st.selectbox("Куда ушли часы — группировать по", GROUP_COLS, key="fact_group_by")
+        col1, col2 = st.columns(2)
+        with col1:
+            long_df = summary.melt(id_vars=["Сотрудник"], value_vars=["План, ч", "Факт по отметке, ч"],
+                                   var_name="Часы по", value_name="Часы")
+            st.plotly_chart(px.bar(long_df, x="Сотрудник", y="Часы", color="Часы по", barmode="group",
+                                   title="План и факт по сотрудникам"), use_container_width=True)
+        with col2:
+            by_person = fact_rows.groupby(["Сотрудник", group_by])[HOURS_COL].sum().reset_index()
+            st.plotly_chart(px.bar(by_person, x="Сотрудник", y=HOURS_COL, color=group_by,
+                                   category_orders={"Сотрудник": summary["Сотрудник"].tolist()},
+                                   title=f"Факт по отметке: {group_by}"), use_container_width=True)
+
+        st.markdown(f"**Команда: факт по «{group_by}»**")
+        st.dataframe(fact_breakdown(fact_rows, group_by), use_container_width=True, hide_index=True,
+                     column_config={"Доля": st.column_config.NumberColumn(format="percent"),
+                                    "Часы": st.column_config.NumberColumn(format="%.2f")})
+
+        st.subheader("По каждому сотруднику")
+        for _, row in summary.iterrows():
+            name = row["Сотрудник"]
+            mine = fact_rows[fact_rows["Сотрудник"] == name]
+            with st.expander(f"{name}: план {row['План, ч']:g} ч, факт {row['Факт по отметке, ч']:g} ч "
+                             f"({row['Отклонение, ч']:+g} ч)"):
+                left, right = st.columns(2)
+                with left:
+                    st.markdown("**План в планировщике**")
+                    tickets = plan_people[name][0] if name in plan_people and label else None
+                    if tickets is None or tickets.empty:
+                        st.caption("Плана на эту неделю нет.")
+                    else:
+                        t = tickets[(tickets[label] != 0) | (tickets[actual_label(label)] != 0)]
+                        t = t[["Тикет", "Название", label, actual_label(label)]].rename(
+                            columns={label: "План, ч", actual_label(label): "Факт в планировщике, ч"})
+                        st.dataframe(t.sort_values("План, ч", ascending=False), use_container_width=True,
+                                     hide_index=True)
+                with right:
+                    st.markdown(f"**Факт по отметке: {group_by}**")
+                    if mine.empty:
+                        st.caption("Отметок за эту неделю нет.")
+                    else:
+                        st.dataframe(fact_breakdown(mine, group_by), use_container_width=True, hide_index=True,
+                                     column_config={"Доля": st.column_config.NumberColumn(format="percent"),
+                                                    "Часы": st.column_config.NumberColumn(format="%.2f")})
+                        per_day = mine.groupby(DATE_COL)[HOURS_COL].sum()
+                        st.caption("По дням: " + ", ".join(f"{d:%d.%m} — {h:g} ч" for d, h in per_day.items()))
+
+        st.download_button(
+            "Скачать Excel план vs факт",
+            data=build_comparison_workbook(summary, fact_rows, group_by),
+            file_name=f"План_факт_{key}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )

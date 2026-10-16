@@ -118,3 +118,31 @@ def test_history_tab_empty(monkeypatch, tmp_path):
     at.run()
     assert not at.exception
     assert any("История пока пустая" in info.value for info in at.info)
+
+
+def test_plan_vs_fact_tab(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+
+    from fact import FACT_COLS
+
+    monday = date.today() - timedelta(days=date.today().weekday())
+    week = f"{monday:%d.%m}–{monday + timedelta(days=6):%d.%m} ч"
+    row = {"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
+           "Срок": None, "В работе": True, week: 10.0}
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", {"Иванов Иван": pd.DataFrame([row])}, [week])
+    fact = pd.DataFrame([{"Дата": monday, "Сотрудник": "Иванов Иван Петрович", "Проект": "ОГВ",
+                          "Вид затрат": "Инвестиции", "Часы": 12.0, "Примечание": "фича"}],
+                        columns=FACT_COLS).fillna("")
+    store.save_fact("fact.xlsx", fact)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["Факт команды"] == "12 ч"
+    assert metrics["Факт / план"] == "120%"
+
+    at.selectbox(key="fact_group_by").select("Вид затрат").run()
+    assert not at.exception

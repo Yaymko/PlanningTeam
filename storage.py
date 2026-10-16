@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from core import DEFAULT_NORM, FIXED_COLS, actual_label, hour_cols, merge_saved_hours, normalize_rows, week_key
+from fact import DATE_COL, FACT_COLS, plan_week_label, split_by_week
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
 
@@ -44,6 +45,13 @@ CREATE TABLE IF NOT EXISTS week_history (
     file_name   TEXT NOT NULL,
     archived_at TEXT NOT NULL,
     PRIMARY KEY (week_key, name)
+);
+-- Фактические часы из выгрузки учёта рабочего времени, по неделям (ключ — дата понедельника).
+CREATE TABLE IF NOT EXISTS fact_week (
+    week_key    TEXT PRIMARY KEY,
+    rows        TEXT NOT NULL,
+    file_name   TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
 );
 """
 
@@ -224,3 +232,46 @@ class Store:
             raise KeyError(key)
         label = rows[0][0]
         return label, {name: (rows_from_json(r, [label]), norm, upd) for _, name, r, norm, upd in rows}
+
+    # --- фактические часы из учёта рабочего времени ----------------------------------
+
+    def save_fact(self, file_name: str, fact_df: pd.DataFrame) -> list:
+        """Сохраняет выгрузку факта по неделям; недели из файла заменяются целиком. Ключи недель."""
+        weeks = split_by_week(fact_df)
+        with closing(self._connect()) as conn, conn:
+            for key, part in weeks.items():
+                part = part.assign(**{DATE_COL: part[DATE_COL].map(lambda d: d.isoformat())})
+                conn.execute(
+                    "INSERT OR REPLACE INTO fact_week (week_key, rows, file_name, uploaded_at) VALUES (?, ?, ?, ?)",
+                    (key, part.to_json(orient="records", force_ascii=False), file_name, _now()))
+        return list(weeks)
+
+    def fact_weeks(self) -> list:
+        """Недели с фактом, новые первыми: [{'key', 'file_name', 'uploaded_at'}]."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT week_key, file_name, uploaded_at FROM fact_week ORDER BY week_key DESC").fetchall()
+        return [{"key": k, "file_name": f, "uploaded_at": u} for k, f, u in rows]
+
+    def load_fact(self, key: str) -> pd.DataFrame:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT rows FROM fact_week WHERE week_key = ?", (key,)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        df = pd.DataFrame(json.loads(row[0]), columns=FACT_COLS)
+        df[DATE_COL] = [date.fromisoformat(v) for v in df[DATE_COL]]
+        return df
+
+    def plan_for_week(self, key: str, today: date = None):
+        """План на неделю для сравнения с фактом: (заголовок недели, {имя: (тикеты, норма, сохранено)})
+        из текущего плана или из истории; (None, {}) — если такой недели нет нигде."""
+        today = today or date.today()
+        plan = self.get_plan()
+        if plan:
+            label = plan_week_label(plan["week_labels"], key, today)
+            if label:
+                return label, self.load_all()
+        try:
+            return self.load_history_week(key)
+        except KeyError:
+            return None, {}
