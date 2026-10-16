@@ -13,7 +13,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from core import DEFAULT_NORM, FIXED_COLS, actual_label, hour_cols, merge_saved_hours, normalize_rows, week_key
+from core import (
+    DEFAULT_NORM,
+    FIXED_COLS,
+    actual_label,
+    drop_empty_rows,
+    hour_cols,
+    merge_saved_hours,
+    normalize_rows,
+    week_key,
+)
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
 
@@ -119,7 +128,8 @@ class Store:
         Уже введённые часы по совпадающим тикетам и неделям переносятся, нормы сохраняются.
         Если набор недель поменялся (новая неделя), отметки «заполнено» сбрасываются.
         Недели, которых нет в новой выгрузке, уходят в историю; если неделя из истории снова
-        появилась в выгрузке, её часы возвращаются в план.
+        появилась в выгрузке, её часы возвращаются в план. Пустые строки (без тикета, названия
+        и часов) убираются.
         """
         today = today or date.today()
         old_plan = self.get_plan()
@@ -162,6 +172,7 @@ class Store:
                     updated_at = old_updated if same_weeks else None
                 for hist_df in history.get(name, []):
                     df = merge_saved_hours(df, hist_df, week_labels)
+                df = drop_empty_rows(df, week_labels)
                 conn.execute(
                     "INSERT INTO people (name, position, rows, norm, updated_at) VALUES (?, ?, ?, ?, ?)",
                     (name, position, rows_to_json(df, week_labels), norm, updated_at))
