@@ -371,17 +371,33 @@ with tab_fact:
                      use_container_width=True, hide_index=True)
 
         group_by = st.selectbox("Куда ушли часы — группировать по", GROUP_COLS, key="fact_group_by")
-        col1, col2 = st.columns(2)
-        with col1:
-            long_df = summary.melt(id_vars=["Сотрудник"], value_vars=["План, ч", "Факт по отметке, ч"],
-                                   var_name="Часы по", value_name="Часы")
-            st.plotly_chart(px.bar(long_df, x="Сотрудник", y="Часы", color="Часы по", barmode="group",
-                                   title="План и факт по сотрудникам"), use_container_width=True)
-        with col2:
-            by_person = fact_rows.groupby(["Сотрудник", group_by])[HOURS_COL].sum().reset_index()
-            st.plotly_chart(px.bar(by_person, x="Сотрудник", y=HOURS_COL, color=group_by,
-                                   category_orders={"Сотрудник": summary["Сотрудник"].tolist()},
-                                   title=f"Факт по отметке: {group_by}"), use_container_width=True)
+        long_df = summary.melt(id_vars=["Сотрудник"], value_vars=["План, ч", "Факт по отметке, ч"],
+                               var_name="Часы по", value_name="Часы")
+        st.plotly_chart(px.bar(long_df, x="Сотрудник", y="Часы", color="Часы по", barmode="group",
+                               title="План и факт по сотрудникам"), use_container_width=True)
+
+        # Самые затратные группы — сверху столбцов и первыми в легенде, с долей от всей отметки команды.
+        by_person = fact_rows.groupby(["Сотрудник", group_by])[HOURS_COL].sum().reset_index()
+        group_totals = by_person.groupby(group_by)[HOURS_COL].sum().sort_values(ascending=False)
+        share = group_totals / group_totals.sum() if group_totals.sum() else group_totals
+        legend_label = {g: f"{g} — {share[g]:.1%}" for g in group_totals.index}
+        person_totals = by_person.groupby("Сотрудник")[HOURS_COL].transform("sum")
+        by_person = by_person.assign(**{
+            "Группа": by_person[group_by].map(legend_label),
+            "Доля у сотрудника": by_person[HOURS_COL] / person_totals,
+            "Доля в команде": by_person[HOURS_COL] / group_totals.sum(),
+        })
+        fig_groups = px.bar(
+            by_person, x="Сотрудник", y=HOURS_COL, color="Группа",
+            category_orders={"Сотрудник": summary["Сотрудник"].tolist(),
+                             "Группа": [legend_label[g] for g in reversed(group_totals.index)]},
+            custom_data=[group_by, "Доля у сотрудника", "Доля в команде"],
+            title=f"Факт по отметке: {group_by} (доля от всей отметки команды)")
+        fig_groups.update_traces(hovertemplate="%{x}<br>%{customdata[0]}<br>%{y:.2f} ч — "
+                                               "%{customdata[1]:.0%} часов сотрудника, "
+                                               "%{customdata[2]:.1%} всей отметки<extra></extra>")
+        fig_groups.update_layout(legend={"traceorder": "reversed", "title": {"text": group_by}}, height=650)
+        st.plotly_chart(fig_groups, use_container_width=True)
 
         st.markdown(f"**Команда: факт по «{group_by}»**")
         st.dataframe(fact_breakdown(fact_rows, group_by), use_container_width=True, hide_index=True,
