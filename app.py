@@ -176,13 +176,22 @@ with tab_planning:
         for name, (df, norm, saved_at) in everyone.items():
             row = {"Сотрудник": name, "Сохранено": fmt_saved(saved_at), "Норма, ч/нед": norm}
             for wl, wc, fc in zip(shown_weeks, week_cols, fact_cols):
-                row[wc] = df[wl].sum()
-                row[fc] = df[actual_label(wl)].sum()
+                row[wc] = round(df[wl].sum(), 2)
+                row[fc] = round(df[actual_label(wl)].sum(), 2)
             rows.append(row)
         paired_cols = [c for pair in zip(week_cols, fact_cols) for c in pair]
         summary = pd.DataFrame(rows, columns=["Сотрудник", "Сохранено", "Норма, ч/нед", *paired_cols])
 
-        not_filled = [name for name, (_, _, saved_at) in everyone.items() if not saved_at]
+        # Не заполнил: ни разу не сохранял или на какой-то из показанных недель 0 ч плана
+        # (например, лишние строки удалил, а часы ещё не проставил).
+        not_filled = []
+        for name, (_, _, saved_at) in everyone.items():
+            row = summary.loc[summary["Сотрудник"] == name].iloc[0]
+            empty_weeks = [wc for wc in week_cols if row[wc] == 0]
+            if not saved_at:
+                not_filled.append(name)
+            elif empty_weeks:
+                not_filled.append(f"{name} (0 ч на {', '.join(empty_weeks)})")
         filled = len(everyone) - len(not_filled)
         if not_filled:
             st.warning(f"Заполнили часы: {filled} из {len(everyone)}. Ещё не заполнили: " + ", ".join(not_filled))
@@ -190,20 +199,29 @@ with tab_planning:
             st.success(f"Все {len(everyone)} сотрудников заполнили часы.")
 
         st.subheader("Сводка по команде")
-        st.caption("По каждой неделе — план и рядом факт. Подсветка перегруза — по плану.")
+        st.caption("По каждой неделе — план и рядом факт. Подсветка — по плану: оранжевый — часы не заполнены "
+                   "(0 ч), жёлтый — меньше нормы, зелёный — ровно норма, красный — больше нормы.")
 
-        def highlight_overload(row):
+        def highlight_load(row):
+            norm = row["Норма, ч/нед"]
+            missing = any(row[wc] == 0 for wc in week_cols)
             styles = []
             for col in summary.columns:
-                if col in week_cols and row[col] > row["Норма, ч/нед"] > 0:
-                    styles.append("background-color:#F4CCCC")
-                elif col in week_cols and 0 < row[col] <= row["Норма, ч/нед"]:
-                    styles.append("background-color:#D9EAD3")
-                else:
+                if col == "Сотрудник" and missing:
+                    styles.append("background-color:#FCE5CD")
+                elif col not in week_cols:
                     styles.append("")
+                elif row[col] == 0:
+                    styles.append("background-color:#FCE5CD")
+                elif row[col] > norm > 0:
+                    styles.append("background-color:#F4CCCC")
+                elif row[col] < norm:
+                    styles.append("background-color:#FFF2CC")
+                else:
+                    styles.append("background-color:#D9EAD3")
             return styles
 
-        styled = (summary.style.apply(highlight_overload, axis=1)
+        styled = (summary.style.apply(highlight_load, axis=1)
                   .format(precision=2, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
         st.dataframe(styled, use_container_width=True, hide_index=True)

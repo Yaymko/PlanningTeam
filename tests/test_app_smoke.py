@@ -19,7 +19,7 @@ WEEK_LABELS = ["28.09–04.10 ч", "05.10–11.10 ч"]
 def _plan_people():
     df = pd.DataFrame(
         [{"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
-          "Срок": None, "В работе": True, WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 0.0}],
+          "Срок": None, "В работе": True, WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 6.0}],
         columns=FIXED_COLS + WEEK_LABELS,
     )
     return {"Иванов Иван": df, "Петрова Анна": df.copy()}
@@ -57,6 +57,24 @@ def test_employee_saves_hours_and_planning_sees_them(monkeypatch, tmp_path):
     assert norm == 32.0
     assert saved_at
     assert any("Ещё не заполнили: Петрова Анна" in w.value for w in at.warning)
+
+
+def test_saved_with_zero_planned_hours_counts_as_not_filled(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    df, _, _ = store.load_person("Иванов Иван")
+    store.save_person("Иванов Иван", df.iloc[0:0], 40)  # deleted every row, no hours entered yet
+    df, _, _ = store.load_person("Петрова Анна")
+    df.loc[0, WEEK_LABELS[1]] = 0.0
+    store.save_person("Петрова Анна", df, 40)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    week1, week2 = (w[:-2] for w in WEEK_LABELS)
+    assert any(f"Заполнили часы: 0 из 2. Ещё не заполнили: Иванов Иван (0 ч на {week1}, {week2}), "
+               f"Петрова Анна (0 ч на {week2})" in w.value for w in at.warning)
 
 
 def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_path):
