@@ -203,3 +203,23 @@ def test_week_back_in_export_is_restored_from_history(tmp_path):
     assert df.loc[0, WEEKS[0]] == 5.0 and df.loc[0, actual_label(WEEKS[0])] == 6.0
     assert df.loc[0, WEEKS[1]] == 7.0
     assert [w["label"] for w in store.history_weeks()] == ["12.10–18.10 ч"]
+
+
+def test_empty_rows_are_dropped_on_upload(tmp_path):
+    blank = {"Тикет": "", "Название": "", "Колонка": "Доп. работа", "Доска": None, "Срок": None,
+             "В работе": False, **dict.fromkeys(WEEKS, 0.0)}
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0]), blank, blank])}, WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    assert list(df["Тикет"]) == ["A-1"]
+
+    # Rows with a title, or with hours but no title, are kept; blank placeholders in the next export go.
+    keep_hours = {**blank, WEEKS[1]: 2.0}
+    keep_title = {**blank, "Название": "Созвоны"}
+    store.save_person("Иванов", _df(WEEKS, [_ticket("A-1", WEEKS, [1, 1]), keep_hours, keep_title]), 40)
+    nb = {**blank, **dict.fromkeys(NEXT_WEEKS, 0.0)}
+    store.save_plan("w2.xlsx", {"Иванов": _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0]), nb, nb])},
+                    NEXT_WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    assert list(df["Тикет"]) == ["A-1", ""]
+    assert list(df["Название"]) == ["Задача A-1", "Созвоны"]

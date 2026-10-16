@@ -35,8 +35,11 @@ from fact import (
     week_title,
 )
 from storage import Store, db_path_from_env
+from table_filter import apply_filter, filter_controls, filter_table, merge_view_edits
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
+
+ROW_ID = "_row_id"  # hidden row id that ties edits in a filtered editor back to the full table
 
 
 @st.cache_resource(show_spinner=False)
@@ -76,9 +79,9 @@ with tab_mine:
     else:
         week_labels = plan["week_labels"]
         st.caption("Выберите себя, впишите плановые часы по тикетам на неделю и нажмите «Сохранить». "
-                   "В конце недели впишите в колонку «факт» сколько часов реально ушло и снова сохраните. Строки "
-                   "«Доп. работа» — для задач, которых нет на доске: впишите название и часы. Новые строки "
-                   "добавляются кнопкой «+» внизу таблицы. Чтобы убрать тикет или работу, отметьте "
+                   "В конце недели впишите в колонку «факт» сколько часов реально ушло и снова сохраните. Для задач, "
+                   "которых нет на доске, добавьте строку кнопкой «+» внизу таблицы и впишите название и часы. "
+                   "Чтобы убрать тикет или работу, отметьте "
                    "галочку «Удалить» в начале строки: строка удалится при сохранении.")
         selected = st.selectbox("Сотрудник", store.people(), index=None, placeholder="Выберите себя из списка")
         if selected:
@@ -126,11 +129,35 @@ with tab_mine:
             shown_weeks = visible_weeks(week_labels, key="all_weeks_mine")
             # Hidden weeks stay in the data (column_order only hides them), so saving keeps their hours.
             column_order = [DELETE_COL, *FIXED_COLS, *hour_cols(shown_weeks)]
-            edited = st.data_editor(base_df, column_config=column_config, column_order=column_order,
+
+            # Search and filters show part of the rows in the editor. The editor's baseline must stay
+            # fixed while the filter is unchanged, so edits are merged into the full table every run and
+            # that merged table becomes the new baseline only when the filter changes (new editor key).
+            works = st.session_state.setdefault("filter_works", {})
+            if editor_key not in works:
+                works[editor_key] = {"full": base_df.assign(**{ROW_ID: range(len(base_df))}),
+                                     "spec": None, "merged": None, "gen": 0, "carried": False,
+                                     "view_dirty": False}
+            work = works[editor_key]
+            labels = {c: column_config[c]["label"] for c in hour_cols(shown_weeks)}
+            spec = filter_controls(work["full"], key=f"filter_{editor_key}", columns=column_order[1:],
+                                   labels=labels)
+            if spec != work["spec"]:
+                if work["merged"] is not None:
+                    work["carried"] = work["carried"] or work["view_dirty"]
+                    work["full"] = work["merged"]
+                work["spec"], work["gen"] = spec, work["gen"] + 1
+            view = apply_filter(work["full"], spec)
+            if len(view) != len(work["full"]):
+                st.caption(f"Показано строк: {len(view)} из {len(work['full'])}. Правки в скрытых фильтром "
+                           "строках не теряются, итоги ниже — по всем строкам.")
+            view_key = f"{editor_key}_view{work['gen']}"
+            edited = st.data_editor(view, column_config=column_config, column_order=column_order,
                                     hide_index=True, use_container_width=True, num_rows="dynamic",
-                                    key=editor_key)
-            kept = drop_marked_rows(edited)
-            marked = len(edited) - len(kept)
+                                    key=view_key)
+            work["merged"] = merge_view_edits(work["full"], view, edited, ROW_ID)
+            kept = drop_marked_rows(work["merged"]).drop(columns=ROW_ID)
+            marked = len(work["merged"]) - len(kept)
             if marked:
                 st.caption(f":red[Отмечено к удалению строк: {marked}. Они удалятся при сохранении "
                            "и уже не учитываются в итогах ниже.]")
@@ -146,9 +173,9 @@ with tab_mine:
                            delta_color="inverse" if delta > 0 else "off")
                 col.caption(f"Факт: {actual:g} ч")
 
-            editor_state = st.session_state.get(editor_key, {})
-            dirty = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows")) \
-                or norm_val != float(saved_norm)
+            editor_state = st.session_state.get(view_key, {})
+            work["view_dirty"] = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows"))
+            dirty = work["view_dirty"] or work["carried"] or norm_val != float(saved_norm)
             if dirty:
                 st.caption(":orange[Есть несохранённые изменения.]")
 
@@ -156,6 +183,7 @@ with tab_mine:
                 store.save_person(selected, kept, norm_val)
                 versions[selected] = ver + 1
                 baselines.pop(editor_key, None)
+                works.pop(editor_key, None)
                 st.toast("Часы сохранены")
                 st.rerun()
 
@@ -164,7 +192,8 @@ with tab_planning:
     with st.expander("Загрузить выгрузку с доски на новую неделю", expanded=not plan):
         st.caption("Файл становится планом недели для всей команды. Уже введённые часы по совпадающим "
                    "тикетам и неделям сохраняются, отметки «заполнено» сбрасываются, если недели в файле новые. "
-                   "Недели, которых нет в новом файле, со всеми часами переходят во вкладку «История».")
+                   "Недели, которых нет в новом файле, со всеми часами переходят во вкладку «История». "
+                   "Пустые строки (без тикета, названия и часов) удаляются.")
         uploaded = st.file_uploader("Еженедельный экспорт с Agile-доски (.xlsx)", type="xlsx")
         if uploaded and st.button("Сделать планом недели"):
             people_data, week_labels = parse_workbook(uploaded.getvalue())
@@ -187,13 +216,22 @@ with tab_planning:
         for name, (df, norm, saved_at) in everyone.items():
             row = {"Сотрудник": name, "Сохранено": fmt_saved(saved_at), "Норма, ч/нед": norm}
             for wl, wc, fc in zip(shown_weeks, week_cols, fact_cols):
-                row[wc] = df[wl].sum()
-                row[fc] = df[actual_label(wl)].sum()
+                row[wc] = round(df[wl].sum(), 2)
+                row[fc] = round(df[actual_label(wl)].sum(), 2)
             rows.append(row)
         paired_cols = [c for pair in zip(week_cols, fact_cols) for c in pair]
         summary = pd.DataFrame(rows, columns=["Сотрудник", "Сохранено", "Норма, ч/нед", *paired_cols])
 
-        not_filled = [name for name, (_, _, saved_at) in everyone.items() if not saved_at]
+        # Не заполнил: ни разу не сохранял или на какой-то из показанных недель 0 ч плана
+        # (например, лишние строки удалил, а часы ещё не проставил).
+        not_filled = []
+        for name, (_, _, saved_at) in everyone.items():
+            row = summary.loc[summary["Сотрудник"] == name].iloc[0]
+            empty_weeks = [wc for wc in week_cols if row[wc] == 0]
+            if not saved_at:
+                not_filled.append(name)
+            elif empty_weeks:
+                not_filled.append(f"{name} (0 ч на {', '.join(empty_weeks)})")
         filled = len(everyone) - len(not_filled)
         if not_filled:
             st.warning(f"Заполнили часы: {filled} из {len(everyone)}. Ещё не заполнили: " + ", ".join(not_filled))
@@ -201,20 +239,30 @@ with tab_planning:
             st.success(f"Все {len(everyone)} сотрудников заполнили часы.")
 
         st.subheader("Сводка по команде")
-        st.caption("По каждой неделе — план и рядом факт. Подсветка перегруза — по плану.")
+        st.caption("По каждой неделе — план и рядом факт. Подсветка — по плану: оранжевый — часы не заполнены "
+                   "(0 ч), жёлтый — меньше нормы, зелёный — ровно норма, красный — больше нормы.")
 
-        def highlight_overload(row):
+        def highlight_load(row):
+            norm = row["Норма, ч/нед"]
+            missing = any(row[wc] == 0 for wc in week_cols)
             styles = []
             for col in summary.columns:
-                if col in week_cols and row[col] > row["Норма, ч/нед"] > 0:
-                    styles.append("background-color:#F4CCCC")
-                elif col in week_cols and 0 < row[col] <= row["Норма, ч/нед"]:
-                    styles.append("background-color:#D9EAD3")
-                else:
+                if col == "Сотрудник" and missing:
+                    styles.append("background-color:#FCE5CD")
+                elif col not in week_cols:
                     styles.append("")
+                elif row[col] == 0:
+                    styles.append("background-color:#FCE5CD")
+                elif row[col] > norm > 0:
+                    styles.append("background-color:#F4CCCC")
+                elif row[col] < norm:
+                    styles.append("background-color:#FFF2CC")
+                else:
+                    styles.append("background-color:#D9EAD3")
             return styles
 
-        styled = (summary.style.apply(highlight_overload, axis=1)
+        shown_summary = filter_table(summary, key="filter_planning_summary")
+        styled = (shown_summary.style.apply(highlight_load, axis=1)
                   .format(precision=2, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
         st.dataframe(styled, use_container_width=True, hide_index=True)
@@ -299,7 +347,8 @@ with tab_history:
             only_fact = sorted(set(hist_fact["Сотрудник"]) - set(people))
             if only_fact:
                 st.caption("Есть в отметке, но не было в плане: " + ", ".join(only_fact))
-        st.dataframe(hist.style.format(precision=2, subset=hist_hour_cols)
+        shown_hist = filter_table(hist, key=f"filter_history_{chosen['key']}")
+        st.dataframe(shown_hist.style.format(precision=2, subset=hist_hour_cols)
                      .format("{:g}", subset=["Норма, ч/нед"]),
                      use_container_width=True, hide_index=True)
 
@@ -309,7 +358,8 @@ with tab_history:
                     st.caption("Часов на эту неделю не было.")
                 else:
                     df = df.assign(Срок=pd.to_datetime(df["Срок"]))
-                    st.dataframe(df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"}),
+                    df = df.rename(columns={label: "План, ч", actual_label(label): "Факт, ч"})
+                    st.dataframe(filter_table(df, key=f"filter_history_{chosen['key']}_{name}"),
                                  use_container_width=True, hide_index=True,
                                  column_config={"Срок": st.column_config.DateColumn(format="DD.MM.YYYY")})
                 if hist_fact is not None:
@@ -391,7 +441,8 @@ with tab_fact:
                     for c in summary.columns]
 
         hour_fmt = ["План, ч", "Факт в планировщике, ч", "Факт по отметке, ч"]
-        st.dataframe(summary.style.apply(highlight_deviation, axis=1)
+        shown_summary = filter_table(summary, key=f"filter_fact_summary_{key}")
+        st.dataframe(shown_summary.style.apply(highlight_deviation, axis=1)
                      .format(precision=2, subset=hour_fmt)
                      .format("{:+.2f}", subset=["Отклонение, ч"])
                      .format("{:.0%}", subset=["Факт / план"], na_rep="—")
@@ -428,7 +479,8 @@ with tab_fact:
         st.plotly_chart(fig_groups, use_container_width=True)
 
         st.markdown(f"**Команда: факт по «{group_by}»**")
-        st.dataframe(fact_breakdown(fact_rows, group_by), use_container_width=True, hide_index=True,
+        st.dataframe(filter_table(fact_breakdown(fact_rows, group_by), key=f"filter_fact_team_{key}"),
+                     use_container_width=True, hide_index=True,
                      column_config={"Доля": st.column_config.NumberColumn(format="percent"),
                                     "Часы": st.column_config.NumberColumn(format="%.2f")})
 
@@ -448,14 +500,17 @@ with tab_fact:
                         t = tickets[(tickets[label] != 0) | (tickets[actual_label(label)] != 0)]
                         t = t[["Тикет", "Название", label, actual_label(label)]].rename(
                             columns={label: "План, ч", actual_label(label): "Факт в планировщике, ч"})
-                        st.dataframe(t.sort_values("План, ч", ascending=False), use_container_width=True,
+                        t = filter_table(t.sort_values("План, ч", ascending=False),
+                                         key=f"filter_fact_plan_{key}_{name}")
+                        st.dataframe(t, use_container_width=True,
                                      hide_index=True)
                 with right:
                     st.markdown(f"**Факт по отметке: {group_by}**")
                     if mine.empty:
                         st.caption("Отметок за эту неделю нет.")
                     else:
-                        st.dataframe(fact_breakdown(mine, group_by), use_container_width=True, hide_index=True,
+                        st.dataframe(filter_table(fact_breakdown(mine, group_by), key=f"filter_fact_mine_{key}_{name}"),
+                                     use_container_width=True, hide_index=True,
                                      column_config={"Доля": st.column_config.NumberColumn(format="percent"),
                                                     "Часы": st.column_config.NumberColumn(format="%.2f")})
                         per_day = mine.groupby(DATE_COL)[HOURS_COL].sum()
