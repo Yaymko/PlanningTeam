@@ -18,12 +18,12 @@ def _sample_people_data():
         [
             {
                 "Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа",
-                "Доска": "1267", "Срок": None, "В работе": True,
+                "Доска": "1267", "Срок": None, "Статус": "в работе",
                 WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 0.0,
             },
             {
                 "Тикет": "", "Название": "Внеплановая задача", "Колонка": "Доп. работа",
-                "Доска": "", "Срок": None, "В работе": False,
+                "Доска": "", "Срок": None, "Статус": "",
                 WEEK_LABELS[0]: 2.0, WEEK_LABELS[1]: 3.0,
             },
         ],
@@ -43,7 +43,7 @@ def test_export_contains_summary_and_person_sheets():
     assert person_ws["A2"].value == "Тикет"
     assert person_ws["A3"].value == "ABC-1"
     # per-ticket total formula
-    assert str(person_ws.cell(row=3, column=9).value).startswith("=SUM(")
+    assert str(person_ws.cell(row=3, column=10).value).startswith("=SUM(")
 
     summary_ws = wb[SUMMARY_SHEET_NAME]
     assert summary_ws["A4"].value == "Иванов Иван Иванович"

@@ -13,8 +13,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core import (
+    DEFAULT_STATUSES,
     DELETE_COL,
     FIXED_COLS,
+    PRIORITIES,
+    PRIORITY_COL,
+    STATUS_COL,
     actual_label,
     build_export_workbook,
     clean_week_label,
@@ -22,6 +26,7 @@ from core import (
     hour_cols,
     nearest_weeks,
     parse_workbook,
+    sort_by_priority,
 )
 from fact import (
     DATE_COL,
@@ -47,12 +52,33 @@ def get_store(path: str) -> Store:
     return Store(path)
 
 
-def visible_weeks(week_labels, key):
-    """Ближайшие 2 недели (прошлая и текущая) или все, если включён переключатель."""
-    show_all = st.toggle("Показать все недели плана", key=key,
-                         help="По умолчанию видны только прошлая и текущая неделя: "
-                              "в начале недели можно внести факт за прошедшую.")
-    return list(week_labels) if show_all else nearest_weeks(week_labels, date.today())
+def visible_weeks(week_labels):
+    """В колонках только 3 ближайшие недели плана: текущая, следующая и через неделю.
+    Часы остальных недель плана остаются в базе и при сохранении не теряются."""
+    return nearest_weeks(week_labels, date.today())
+
+
+def status_reference(store):
+    """Справочник статусов: стандартные и свои; свой можно добавить или убрать."""
+    with st.expander("Справочник статусов"):
+        statuses = store.statuses()
+        st.caption("Статусы для колонки «Статус»: " + ", ".join(statuses) + ". Добавленный статус сразу "
+                   "появляется в списке у всех сотрудников.")
+        with st.form("add_status", clear_on_submit=True, border=False):
+            c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+            new_status = c1.text_input("Новый статус", placeholder="например, на ревью")
+            if c2.form_submit_button("Добавить статус") and new_status.strip():
+                if store.add_status(new_status):
+                    st.toast(f"Статус «{new_status.strip()}» добавлен")
+                    st.rerun()
+                st.warning(f"Статус «{new_status.strip()}» уже есть в справочнике.")
+        custom = statuses[len(DEFAULT_STATUSES):]
+        if custom:
+            c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+            to_remove = c1.selectbox("Убрать свой статус", custom, index=None, placeholder="Выберите статус")
+            if c2.button("Убрать", disabled=not to_remove):
+                store.remove_status(to_remove)
+                st.rerun()
 
 
 def fmt_saved(ts):
@@ -66,7 +92,7 @@ plan = store.get_plan()
 
 st.title("Еженедельное планирование загрузки команды")
 if plan:
-    weeks = ", ".join(clean_week_label(w) for w in plan["week_labels"])
+    weeks = ", ".join(clean_week_label(w) for w in visible_weeks(plan["week_labels"]))
     st.caption(f"План недели: {plan['file_name']} (загружен {fmt_saved(plan['uploaded_at'])}). Недели: {weeks}")
 
 tab_mine, tab_planning, tab_history, tab_fact = st.tabs(["Мои часы", "Планирование", "История", "План vs факт"])
@@ -82,8 +108,10 @@ with tab_mine:
                    "В конце недели впишите в колонку «факт» сколько часов реально ушло и снова сохраните. Для задач, "
                    "которых нет на доске, добавьте строку кнопкой «+» внизу таблицы и впишите название и часы. "
                    "Чтобы убрать тикет или работу, отметьте "
-                   "галочку «Удалить» в начале строки: строка удалится при сохранении.")
+                   "галочку «Удалить» в начале строки: строка удалится при сохранении. Статус и приоритет "
+                   "выбираются из списка; после сохранения строки встают по приоритету — «срочно» наверху.")
         selected = st.selectbox("Сотрудник", store.people(), index=None, placeholder="Выберите себя из списка")
+        status_reference(store)
         if selected:
             # The editor's baseline must stay identical across reruns, otherwise Streamlit resets
             # in-progress edits. So it is loaded from the base once per (person, version), and the
@@ -94,6 +122,9 @@ with tab_mine:
             baselines = st.session_state.setdefault("baselines", {})
             if editor_key not in baselines:
                 df, norm, saved_at = store.load_person(selected)
+                df = sort_by_priority(df)
+                for col in (STATUS_COL, PRIORITY_COL):  # empty cell in the editor, not an empty-string option
+                    df[col] = df[col].astype(object).where(df[col] != "", None)
                 df["Срок"] = pd.to_datetime(df["Срок"])  # proper date column for the editor (empty, not "None")
                 df.insert(0, DELETE_COL, False)
                 baselines[editor_key] = (df, norm, saved_at)
@@ -108,6 +139,7 @@ with tab_mine:
                                        help="Уменьшите, если часть недели в отпуске или на больничном.",
                                        key=f"norm_{editor_key}")
 
+            statuses = store.statuses()
             column_config = {
                 DELETE_COL: st.column_config.CheckboxColumn(
                     help="Отметьте, чтобы удалить строку. Удаление применяется при нажатии «Сохранить».",
@@ -117,7 +149,12 @@ with tab_mine:
                 "Колонка": st.column_config.TextColumn(),
                 "Доска": st.column_config.TextColumn(),
                 "Срок": st.column_config.DateColumn(format="DD.MM.YYYY"),
-                "В работе": st.column_config.CheckboxColumn(),
+                STATUS_COL: st.column_config.SelectboxColumn(
+                    options=[*statuses, *sorted(set(base_df[STATUS_COL].dropna()) - set(statuses))],
+                    help="Статус задачи. Свой статус можно добавить в «Справочнике статусов» над таблицей."),
+                PRIORITY_COL: st.column_config.SelectboxColumn(
+                    options=PRIORITIES,
+                    help="Срочно > высокий > средний > низкий. После сохранения строки встают по приоритету."),
             }
             for wl in week_labels:
                 column_config[wl] = st.column_config.NumberColumn(
@@ -126,7 +163,7 @@ with tab_mine:
                     f"{clean_week_label(wl)} факт", min_value=0.0, step=0.01, format="%g",
                     help="Сколько часов реально ушло на задачу за неделю. Заполняется в конце недели.")
 
-            shown_weeks = visible_weeks(week_labels, key="all_weeks_mine")
+            shown_weeks = visible_weeks(week_labels)
             # Hidden weeks stay in the data (column_order only hides them), so saving keeps their hours.
             column_order = [DELETE_COL, *FIXED_COLS, *hour_cols(shown_weeks)]
 
@@ -208,7 +245,7 @@ with tab_planning:
         week_labels = plan["week_labels"]
         everyone = store.load_all()
         st.button("Обновить", help="Подтянуть часы, сохранённые коллегами с момента открытия страницы")
-        shown_weeks = visible_weeks(week_labels, key="all_weeks_planning")
+        shown_weeks = visible_weeks(week_labels)
         week_cols = [clean_week_label(w) for w in shown_weeks]
         fact_cols = [f"{wc} факт" for wc in week_cols]
 
@@ -296,14 +333,14 @@ with tab_planning:
 
         st.divider()
         st.subheader("Отчёт на неделю")
-        st.caption("Excel с сохранёнными часами всех сотрудников (план и факт по всем неделям плана): "
-                   "лист на каждого, сводка по команде с формулами и графиками.")
+        st.caption("Excel с сохранёнными часами всех сотрудников (план и факт по трём ближайшим неделям): "
+                   "лист на каждого с тикетами по приоритету, сводка по команде с формулами и графиками.")
         if st.button("Сформировать Excel"):
             people_data = {name: df for name, (df, _, _) in everyone.items()}
             norms = {name: norm for name, (_, norm, _) in everyone.items()}
             st.download_button(
                 "Скачать отчёт",
-                data=build_export_workbook(people_data, week_labels, norms),
+                data=build_export_workbook(people_data, shown_weeks, norms),
                 file_name=f"Загрузка_команды_{datetime.now(timezone.utc):%Y-%m-%d}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )

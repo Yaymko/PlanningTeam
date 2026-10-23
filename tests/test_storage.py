@@ -20,7 +20,7 @@ def _df(weeks, rows):
 
 def _ticket(key, weeks, hours, due=None):
     return {"Тикет": key, "Название": f"Задача {key}", "Колонка": "10 Работа", "Доска": "1267",
-            "Срок": due, "В работе": True, **dict(zip(weeks, hours))}
+            "Срок": due, "Статус": "в работе", **dict(zip(weeks, hours))}
 
 
 def test_no_plan_initially(tmp_path):
@@ -39,7 +39,7 @@ def test_saved_hours_survive_restart(tmp_path):
     assert norm == 40.0 and saved_at is None
     df.loc[0, WEEKS[0]] = 6.5
     extra = {"Тикет": None, "Название": "Созвоны", "Колонка": None, "Доска": None, "Срок": None,
-             "В работе": None, WEEKS[0]: 2, WEEKS[1]: None}  # a row added in data_editor
+             "Статус": None, WEEKS[0]: 2, WEEKS[1]: None}  # a row added in data_editor
     store.save_person("Иванов", pd.concat([df, pd.DataFrame([extra])], ignore_index=True), 36)
 
     df, norm, saved_at = Store(path).load_person("Иванов")  # "restart"
@@ -57,7 +57,7 @@ def test_reupload_keeps_hours_for_matching_tickets_and_weeks(tmp_path):
     df, _, _ = store.load_person("Иванов")
     df.loc[0, WEEKS] = [5.0, 7.0]
     extra = _df(WEEKS, [{"Тикет": "", "Название": "Созвоны", "Колонка": "Доп. работа", "Доска": "",
-                         "Срок": None, "В работе": False, WEEKS[0]: 1.0, WEEKS[1]: 3.0}])
+                         "Срок": None, "Статус": "", WEEKS[0]: 1.0, WEEKS[1]: 3.0}])
     store.save_person("Иванов", pd.concat([df, extra], ignore_index=True), 30)
 
     # Same weeks re-uploaded: everything kept, including the "filled" mark.
@@ -123,7 +123,7 @@ def test_database_saved_before_actual_hours_still_loads(tmp_path):
     path = tmp_path / "db.sqlite"
     Store(path)
     old_rows = [{"Тикет": "A-1", "Название": "Задача", "Колонка": "10 Работа", "Доска": "1267",
-                 "Срок": "2026-10-03", "В работе": True, WEEKS[0]: 4.0, WEEKS[1]: 2.0}]
+                 "Срок": "2026-10-03", "Статус": "в работе", WEEKS[0]: 4.0, WEEKS[1]: 2.0}]
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO plan (id, file_name, uploaded_at, week_labels) VALUES (1, 'old.xlsx', "
                      "'2026-10-01T10:00:00+03:00', ?)", (json.dumps(WEEKS, ensure_ascii=False),))
@@ -207,7 +207,7 @@ def test_week_back_in_export_is_restored_from_history(tmp_path):
 
 def test_empty_rows_are_dropped_on_upload(tmp_path):
     blank = {"Тикет": "", "Название": "", "Колонка": "Доп. работа", "Доска": None, "Срок": None,
-             "В работе": False, **dict.fromkeys(WEEKS, 0.0)}
+             "Статус": "", **dict.fromkeys(WEEKS, 0.0)}
     store = Store(tmp_path / "db.sqlite")
     store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0]), blank, blank])}, WEEKS)
     df, _, _ = store.load_person("Иванов")
