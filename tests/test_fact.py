@@ -59,7 +59,7 @@ def _people(hours_by_name):
     out = {}
     for name, (plan, fact) in hours_by_name.items():
         df = pd.DataFrame([{"Тикет": "ABC-1", "Название": "Задача", "Колонка": "10 Работа", "Доска": "1267",
-                            "Срок": None, "В работе": True, WEEKS[0]: 0.0, WEEKS[1]: plan}],
+                            "Срок": None, "Статус": "в работе", WEEKS[0]: 0.0, WEEKS[1]: plan}],
                           columns=FIXED_COLS + WEEKS)
         df[f"{WEEKS[1][:-2]} факт, ч"] = fact
         out[name] = df

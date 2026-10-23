@@ -43,7 +43,7 @@ def test_parses_week_labels_and_rows():
 
     ticket_row = df.iloc[0]
     assert ticket_row["Тикет"] == "ABC-1"
-    assert bool(ticket_row["В работе"]) is True
+    assert ticket_row["Статус"] == "в работе"
     assert ticket_row[WEEK_LABELS[0]] == 4.0
     assert ticket_row[WEEK_LABELS[1]] == 0.0
 
@@ -88,3 +88,26 @@ def test_parses_sheets_without_title_row_and_short_totals_label():
     df = people_data["Петров Пётр Петрович"]
     assert list(df["Тикет"]) == ["ABC-2", ""]
     assert df.iloc[0][labels[0]] == 3.0
+
+
+def test_parses_status_and_priority_columns():
+    """Выгрузка, где уже есть колонки «Статус» и «Приоритет», — недели идут после них."""
+    labels = ["05.10–11.10 ч", "12.10–18.10 ч"]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Петров Пётр Петрович"
+    ws.append(["Тикет", "Название", "Колонка", "Доска", "Срок", "Статус", "Приоритет", *labels, "Итого, ч."])
+    ws.append(["ABC-2", "Другая штука", "10 Работа", "1743", None, "пауза", "срочно", 3, 1, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    people_data, week_labels = parse_workbook(buf.getvalue())
+
+    assert week_labels == labels
+    row = people_data["Петров Пётр Петрович"].iloc[0]
+    assert (row["Статус"], row["Приоритет"], row[labels[0]], row[labels[1]]) == ("пауза", "срочно", 3.0, 1.0)
+
+
+def test_legacy_in_work_flag_becomes_status():
+    people_data, _ = parse_workbook(_build_sample_workbook())
+    assert people_data["Иванов Иван Иванович"]["Статус"].tolist() == ["в работе", ""]

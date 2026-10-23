@@ -19,7 +19,7 @@ WEEK_LABELS = ["28.09–04.10 ч", "05.10–11.10 ч"]
 def _plan_people():
     df = pd.DataFrame(
         [{"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
-          "Срок": None, "В работе": True, WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 6.0}],
+          "Срок": None, "Статус": "в работе", WEEK_LABELS[0]: 4.0, WEEK_LABELS[1]: 6.0}],
         columns=FIXED_COLS + WEEK_LABELS,
     )
     return {"Иванов Иван": df, "Петрова Анна": df.copy()}
@@ -86,7 +86,7 @@ def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_pat
     weeks = [f"{(monday + timedelta(weeks=i)):%d.%m}–{(monday + timedelta(weeks=i, days=6)):%d.%m} ч"
              for i in range(-1, 3)]
     row = {"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
-           "Срок": None, "В работе": True}
+           "Срок": None, "Статус": "в работе"}
     for i, wl in enumerate(weeks):
         row[wl], row[actual_label(wl)] = float(i + 1), float(i + 10)
     db = tmp_path / "db.sqlite"
@@ -108,10 +108,7 @@ def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_pat
     df, _, _ = Store(db).load_person("Иванов Иван")
     assert [df.loc[0, wl] for wl in weeks] == [1.0, 2.0, 3.0, 4.0]
     assert [df.loc[0, actual_label(wl)] for wl in weeks] == [10.0, 11.0, 12.0, 13.0]
-
-    at.toggle(key="all_weeks_mine").set_value(True).run()
-    assert not at.exception
-    assert len(at.metric) == 4
+    assert not at.toggle  # no "show all weeks" switch: only the 2 nearest weeks are columns
 
 
 def test_history_tab_shows_past_week(monkeypatch, tmp_path):
@@ -146,7 +143,7 @@ def test_plan_vs_fact_tab(monkeypatch, tmp_path):
     monday = date.today() - timedelta(days=date.today().weekday())
     week = f"{monday:%d.%m}–{monday + timedelta(days=6):%d.%m} ч"
     row = {"Тикет": "ABC-1", "Название": "Сделать штуку", "Колонка": "10 Работа", "Доска": "1267",
-           "Срок": None, "В работе": True, week: 10.0}
+           "Срок": None, "Статус": "в работе", week: 10.0}
     db = tmp_path / "db.sqlite"
     store = Store(db)
     store.save_plan("board.xlsx", {"Иванов Иван": pd.DataFrame([row])}, [week])
@@ -167,7 +164,7 @@ def test_plan_vs_fact_tab(monkeypatch, tmp_path):
 
 
 def _two_ticket_people():
-    rows = [{"Тикет": t, "Название": n, "Колонка": "10 Работа", "Доска": "1267", "Срок": None, "В работе": True,
+    rows = [{"Тикет": t, "Название": n, "Колонка": "10 Работа", "Доска": "1267", "Срок": None, "Статус": "в работе",
              WEEK_LABELS[0]: h, WEEK_LABELS[1]: 0.0}
             for t, n, h in [("ABC-1", "Сделать штуку", 4.0), ("ABC-2", "Починить импорт", 2.0)]]
     df = pd.DataFrame(rows, columns=FIXED_COLS + WEEK_LABELS)
@@ -180,7 +177,8 @@ def test_search_in_my_hours_keeps_hidden_rows_on_save(monkeypatch, tmp_path):
     at = _app(monkeypatch, db)
     at.run()
     at.selectbox[0].select("Иванов Иван").run()
-    search = next(t for t in at.text_input if t.key.startswith("filter_editor_") and t.key.endswith("_search"))
+    search = next(t for t in at.text_input
+                  if t.key and t.key.startswith("filter_editor_") and t.key.endswith("_search"))
     search.input("импорт").run()
     assert not at.exception
     assert any("Показано строк: 1 из 2" in c.value for c in at.caption)
@@ -233,3 +231,42 @@ def test_history_tab_shows_fact_from_time_tracking(monkeypatch, tmp_path):
     at.run()
     assert not at.exception
     assert any(m.label == "Факт по отметке" and m.value == "5 ч" for m in at.metric)
+
+
+def test_status_reference_adds_custom_status(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    at = _app(monkeypatch, db)
+    at.run()
+    at.text_input[0].input("на ревью")
+    next(b for b in at.button if b.label == "Добавить статус").click().run()
+    assert not at.exception
+    assert Store(db).statuses()[-1] == "на ревью"
+
+    at.selectbox[0].select("Иванов Иван").run()
+    assert not at.exception
+    df, _, _ = Store(db).load_person("Иванов Иван")
+    assert df.loc[0, "Статус"] == "в работе"
+
+
+def test_planning_shows_only_two_nearest_weeks(monkeypatch, tmp_path):
+    from datetime import date, timedelta
+
+    monday = date.today() - timedelta(days=date.today().weekday())
+    weeks = [f"{(monday + timedelta(weeks=i)):%d.%m}–{(monday + timedelta(weeks=i, days=6)):%d.%m} ч"
+             for i in range(-1, 3)]
+    row = {"Тикет": "ABC-1", "Название": "x", "Колонка": "", "Доска": "", "Срок": None, "Статус": "в работе",
+           **dict.fromkeys(weeks, 5.0)}
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", {"Иванов Иван": pd.DataFrame([row])}, weeks)
+
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not at.exception
+    assert not at.toggle
+    shown = [w[:-2] for w in weeks]
+    summary = at.dataframe[0].value
+    assert shown[0] in summary.columns and shown[1] in summary.columns
+    assert shown[2] not in summary.columns and shown[3] not in summary.columns
+    next(b for b in at.button if b.label == "Сформировать Excel").click().run()
+    assert not at.exception

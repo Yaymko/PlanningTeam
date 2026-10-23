@@ -15,12 +15,14 @@ import pandas as pd
 
 from core import (
     DEFAULT_NORM,
+    DEFAULT_STATUSES,
     FIXED_COLS,
     actual_label,
     drop_empty_rows,
     hour_cols,
     merge_saved_hours,
     normalize_rows,
+    sort_by_priority,
     week_key,
 )
 from fact import DATE_COL, FACT_COLS, plan_week_label, split_by_week
@@ -62,6 +64,11 @@ CREATE TABLE IF NOT EXISTS fact_week (
     file_name   TEXT NOT NULL,
     uploaded_at TEXT NOT NULL
 );
+-- Свои статусы тикетов, добавленные к стандартным (справочник для колонки «Статус»).
+CREATE TABLE IF NOT EXISTS statuses (
+    name     TEXT PRIMARY KEY,
+    added_at TEXT NOT NULL
+);
 """
 
 
@@ -95,7 +102,6 @@ def rows_to_json(df: pd.DataFrame, week_labels: list) -> str:
     for _, row in df.iterrows():
         rec = {col: row[col] for col in FIXED_COLS}
         rec["Срок"] = _date_to_str(rec["Срок"])
-        rec["В работе"] = bool(rec["В работе"])
         for col in hour_cols(week_labels):
             rec[col] = float(row[col])
         records.append(rec)
@@ -104,7 +110,9 @@ def rows_to_json(df: pd.DataFrame, week_labels: list) -> str:
 
 def rows_from_json(text: str, week_labels: list) -> pd.DataFrame:
     # Строки, сохранённые до появления фактических часов, их не содержат — normalize_rows ставит 0.
-    df = pd.DataFrame(json.loads(text), columns=FIXED_COLS + hour_cols(week_labels))
+    # В строках до колонки «Статус» вместо неё галочка «В работе» — normalize_rows переводит её в статус.
+    records = json.loads(text)
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=FIXED_COLS + hour_cols(week_labels))
     df["Срок"] = [date.fromisoformat(v) if isinstance(v, str) and v else None for v in df["Срок"]]
     return normalize_rows(df, week_labels)
 
@@ -219,9 +227,32 @@ class Store:
         with closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "UPDATE people SET rows = ?, norm = ?, updated_at = ? WHERE name = ?",
-                (rows_to_json(df, plan["week_labels"]), float(norm), _now(), name))
+                (rows_to_json(sort_by_priority(normalize_rows(df, plan["week_labels"])), plan["week_labels"]),
+                 float(norm), _now(), name))
             if cur.rowcount == 0:
                 raise KeyError(name)
+
+    # --- справочник статусов ---------------------------------------------------------
+
+    def statuses(self) -> list:
+        """Стандартные статусы и затем добавленные свои — в порядке добавления."""
+        with closing(self._connect()) as conn:
+            custom = [r[0] for r in conn.execute("SELECT name FROM statuses ORDER BY added_at, rowid")]
+        return DEFAULT_STATUSES + [c for c in custom if c not in DEFAULT_STATUSES]
+
+    def add_status(self, name: str) -> bool:
+        """Добавляет свой статус в справочник. False — пустое имя или такой статус уже есть."""
+        name = " ".join(str(name).split())
+        if not name or name.lower() in (s.lower() for s in self.statuses()):
+            return False
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO statuses (name, added_at) VALUES (?, ?)", (name, _now()))
+        return True
+
+    def remove_status(self, name: str) -> None:
+        """Убирает свой статус из справочника (стандартные не убираются). Строки со статусом его сохраняют."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM statuses WHERE name = ?", (name,))
 
     # --- история прошедших недель ----------------------------------------------------
 

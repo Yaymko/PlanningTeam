@@ -15,9 +15,35 @@ from openpyxl.utils import get_column_letter
 
 OVERVIEW_PREFIX = "Обзор тикетов"
 SUMMARY_SHEET_NAME = "Сводка по команде"
-FIXED_COLS = ["Тикет", "Название", "Колонка", "Доска", "Срок", "В работе"]
+FIXED_COLS = ["Тикет", "Название", "Колонка", "Доска", "Срок", "Статус", "Приоритет"]
 DEFAULT_NORM = 40.0
 ACTUAL_SUFFIX = " факт, ч"
+
+STATUS_COL = "Статус"
+PRIORITY_COL = "Приоритет"
+LEGACY_IN_WORK_COL = "В работе"  # было до колонки «Статус»: галочка «в работе»
+IN_WORK_STATUS = "в работе"
+DEFAULT_STATUSES = [IN_WORK_STATUS, "пауза", "заморозка", "отложено"]
+PRIORITIES = ["срочно", "высокий", "средний", "низкий"]  # от самого срочного
+
+
+def status_from_legacy(in_work) -> str:
+    """Галочка «В работе» из старых данных и выгрузок -> статус: отмечено — «в работе», иначе пусто."""
+    if isinstance(in_work, str):
+        return IN_WORK_STATUS if in_work.strip().lower() in ("да", "true", "1", "+", "x", IN_WORK_STATUS) else ""
+    try:
+        return IN_WORK_STATUS if in_work and not pd.isna(in_work) else ""
+    except (TypeError, ValueError):
+        return IN_WORK_STATUS if in_work else ""
+
+
+def sort_by_priority(df: pd.DataFrame) -> pd.DataFrame:
+    """Строки по приоритету: «срочно» наверху, без приоритета — внизу; внутри одного приоритета
+    порядок не меняется."""
+    if PRIORITY_COL not in df.columns or df.empty:
+        return df
+    rank = df[PRIORITY_COL].map(lambda p: PRIORITIES.index(p) if p in PRIORITIES else len(PRIORITIES))
+    return df.iloc[rank.argsort(kind="stable")].reset_index(drop=True)
 
 
 def actual_label(week_label: str) -> str:
@@ -60,7 +86,10 @@ def parse_workbook(file_bytes: bytes):
             continue
         header = [c.value for c in ws[header_row]]
         idx = {h: i for i, h in enumerate(header) if h is not None}
-        start_week_col = idx["В работе"] + 1
+        # Недели идут сразу после последней из известных колонок тикета («В работе» в старых
+        # выгрузках, «Статус»/«Приоритет» — если их добавили в файл).
+        known = [idx[h] for h in [*FIXED_COLS, LEGACY_IN_WORK_COL] if h in idx]
+        start_week_col = max(known) + 1
         end_week_col = idx.get("Итого, ч.", len(header) - 1)
         this_week_labels = [header[i] for i in range(start_week_col, end_week_col)]
         if week_labels is None:
@@ -78,8 +107,13 @@ def parse_workbook(file_bytes: bytes):
                 "Колонка": c_val or "",
                 "Доска": ws.cell(row=r, column=idx.get("Доска", 2) + 1).value if "Доска" in idx else "",
                 "Срок": ws.cell(row=r, column=idx["Срок"] + 1).value,
-                "В работе": bool(ws.cell(row=r, column=idx["В работе"] + 1).value),
             }
+            if STATUS_COL in idx:
+                row[STATUS_COL] = ws.cell(row=r, column=idx[STATUS_COL] + 1).value or ""
+            elif LEGACY_IN_WORK_COL in idx:
+                row[STATUS_COL] = status_from_legacy(ws.cell(row=r, column=idx[LEGACY_IN_WORK_COL] + 1).value)
+            if PRIORITY_COL in idx:
+                row[PRIORITY_COL] = ws.cell(row=r, column=idx[PRIORITY_COL] + 1).value or ""
             for wi, wl in enumerate(this_week_labels):
                 v = ws.cell(row=r, column=start_week_col + 1 + wi).value
                 row[wl] = float(v) if isinstance(v, (int, float)) else 0.0
@@ -95,13 +129,17 @@ def normalize_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
     """Приводит таблицу тикетов к единому виду: пустые ячейки новых строк -> значения по умолчанию,
     часы -> float. Нужна после data_editor (добавленные строки приходят с NaN/None).
     Фактических часов может не быть (выгрузка с доски, данные до их появления) — тогда 0."""
-    df = df.reindex(columns=FIXED_COLS + hour_cols(week_labels)).copy()
+    df = df.copy()
+    if STATUS_COL not in df.columns and LEGACY_IN_WORK_COL in df.columns:
+        df[STATUS_COL] = df[LEGACY_IN_WORK_COL].map(status_from_legacy)
+    df = df.reindex(columns=FIXED_COLS + hour_cols(week_labels))
     df["Тикет"] = df["Тикет"].fillna("").astype(str)
     df["Название"] = df["Название"].fillna("").astype(str)
     df["Колонка"] = df["Колонка"].fillna("Доп. работа").astype(str)
     df["Доска"] = df["Доска"].fillna("").astype(str)
     df["Срок"] = df["Срок"].astype(object).where(df["Срок"].notna(), None)
-    df["В работе"] = df["В работе"].fillna(False).astype(bool)
+    for col in (STATUS_COL, PRIORITY_COL):
+        df[col] = df[col].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip())
     for col in hour_cols(week_labels):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
     return df.reset_index(drop=True)
@@ -132,13 +170,15 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
     """Переносит уже сохранённые часы в свежую выгрузку с доски.
 
     Часы (план и факт) по тикетам переносятся по номеру тикета для недель, которые есть в обеих
-    выгрузках. Строки «Доп. работа» с названием, которых нет в новой выгрузке, добавляются в конец.
+    выгрузках, статус и приоритет — если были заданы. Строки «Доп. работа» с названием, которых нет
+    в новой выгрузке, добавляются в конец.
     """
     new_df = normalize_rows(new_df, week_labels)
     common_weeks = [wl for wl in week_labels if wl in old_df.columns]
-    if old_df.empty or not common_weeks:
+    if old_df.empty:
         return new_df
-    old_df = normalize_rows(old_df, [c for c in old_df.columns if c not in FIXED_COLS and not is_actual_label(c)])
+    not_week = {*FIXED_COLS, LEGACY_IN_WORK_COL}
+    old_df = normalize_rows(old_df, [c for c in old_df.columns if c not in not_week and not is_actual_label(c)])
 
     old_by_ticket = {}
     for _, row in old_df.iterrows():
@@ -146,8 +186,15 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
             old_by_ticket.setdefault(row["Тикет"], row)
     for i, ticket in new_df["Тикет"].items():
         if ticket in old_by_ticket:
+            old = old_by_ticket[ticket]
+            # Статус и приоритет ставят в планировщике — они важнее отметки из выгрузки.
+            for col in (STATUS_COL, PRIORITY_COL):
+                if old[col]:
+                    new_df.at[i, col] = old[col]
             for col in hour_cols(common_weeks):
-                new_df.at[i, col] = float(old_by_ticket[ticket][col])
+                new_df.at[i, col] = float(old[col])
+    if not common_weeks:
+        return new_df
 
     existing_titles = set(new_df.loc[new_df["Тикет"] == "", "Название"])
     extra = old_df[(old_df["Тикет"] == "") & (old_df["Название"] != "")
@@ -228,7 +275,7 @@ def build_export_workbook(people_data: dict, week_labels: list, norms: dict) -> 
 
     totals_row = {}
     for name, df in people_data.items():
-        df = normalize_rows(df, week_labels)
+        df = sort_by_priority(normalize_rows(df, week_labels))
         ws = wb.create_sheet(name[:31])
         ws.cell(row=1, column=1, value=f"{name} — часы по неделям (план и факт), заполнено в планировщике")
         headers = FIXED_COLS + week_labels + ["Итого, ч."] + actual_labels + ["Итого факт, ч."]
@@ -260,7 +307,7 @@ def build_export_workbook(people_data: dict, week_labels: list, norms: dict) -> 
         ws.cell(row=r, column=1).fill = TOTAL_FILL
         totals_row[name] = r
 
-        widths = [14, 50, 22, 10, 12, 10] + ([14] * len(week_labels) + [12]) * 2
+        widths = [14, 50, 22, 10, 12, 12, 11] + ([14] * len(week_labels) + [12]) * 2
         for i, w in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(i)].width = w
 
