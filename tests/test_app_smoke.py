@@ -101,14 +101,14 @@ def test_only_nearest_two_weeks_shown_and_hidden_hours_kept(monkeypatch, tmp_pat
     at.selectbox[0].select("Иванов Иван").run()
     assert not at.exception
     labels = [m.label for m in at.metric]
-    assert labels == [f"План {weeks[0][:-2]}", f"План {weeks[1][:-2]}"]  # previous and current week
+    assert labels == [f"План {w[:-2]}" for w in weeks[1:]]  # current, next and the week after
 
     next(b for b in at.button if b.label == "Сохранить").click().run()
     assert not at.exception
     df, _, _ = Store(db).load_person("Иванов Иван")
     assert [df.loc[0, wl] for wl in weeks] == [1.0, 2.0, 3.0, 4.0]
     assert [df.loc[0, actual_label(wl)] for wl in weeks] == [10.0, 11.0, 12.0, 13.0]
-    assert not at.toggle  # no "show all weeks" switch: only the 2 nearest weeks are columns
+    assert not at.toggle  # no "show all weeks" switch: only the 3 nearest weeks are columns
 
 
 def test_history_tab_shows_past_week(monkeypatch, tmp_path):
@@ -249,12 +249,12 @@ def test_status_reference_adds_custom_status(monkeypatch, tmp_path):
     assert df.loc[0, "Статус"] == "в работе"
 
 
-def test_planning_shows_only_two_nearest_weeks(monkeypatch, tmp_path):
+def test_planning_shows_only_three_nearest_weeks(monkeypatch, tmp_path):
     from datetime import date, timedelta
 
     monday = date.today() - timedelta(days=date.today().weekday())
     weeks = [f"{(monday + timedelta(weeks=i)):%d.%m}–{(monday + timedelta(weeks=i, days=6)):%d.%m} ч"
-             for i in range(-1, 3)]
+             for i in range(-1, 4)]
     row = {"Тикет": "ABC-1", "Название": "x", "Колонка": "", "Доска": "", "Срок": None, "Статус": "в работе",
            **dict.fromkeys(weeks, 5.0)}
     db = tmp_path / "db.sqlite"
@@ -266,7 +266,7 @@ def test_planning_shows_only_two_nearest_weeks(monkeypatch, tmp_path):
     assert not at.toggle
     shown = [w[:-2] for w in weeks]
     summary = at.dataframe[0].value
-    assert shown[0] in summary.columns and shown[1] in summary.columns
-    assert shown[2] not in summary.columns and shown[3] not in summary.columns
+    assert shown[0] not in summary.columns  # last week is hidden
+    assert all(w in summary.columns for w in shown[1:4]) and shown[4] not in summary.columns
     next(b for b in at.button if b.label == "Сформировать Excel").click().run()
     assert not at.exception
