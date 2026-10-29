@@ -249,3 +249,24 @@ def test_extra_work_hours_go_into_same_titled_row_of_new_export(tmp_path):
     assert list(df["Название"]) == ["Задача A-1", "Созвоны", "Дежурство"]
     assert list(df[NEXT_WEEKS[0]]) == [0.0, 3.0, 0.0]
     assert df.loc[2, actual_label(NEXT_WEEKS[0])] == 4.0
+
+
+def test_extra_work_with_hours_only_in_dropped_weeks_is_kept(tmp_path):
+    from core import actual_label
+
+    later = ["19.10–25.10 ч", "26.10–01.11 ч"]  # no week in common with WEEKS
+    extra = {"Тикет": "", "Название": "", "Колонка": "Доп. работа", "Доска": "", "Срок": None,
+             "Статус": "", **dict.fromkeys(WEEKS, 0.0)}
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    rows = [{**extra, "Название": "Созвоны", WEEKS[0]: 2.0},
+            {**extra, actual_label(WEEKS[0]): 1.0},  # no title: an empty row in the new weeks, dropped
+            {**extra, "Название": "Пусто"}]
+    store.save_person("Иванов", pd.concat([df, pd.DataFrame(rows)], ignore_index=True), 40)
+
+    store.save_plan("w3.xlsx", {"Иванов": _df(later, [_ticket("A-1", later, [0, 0])])}, later,
+                    today=date(2026, 10, 20))
+    df, _, _ = store.load_person("Иванов")
+    assert list(df["Название"]) == ["Задача A-1", "Созвоны"]
+    assert df[later].to_numpy().sum() == 0  # hours of the dropped weeks are in the history
