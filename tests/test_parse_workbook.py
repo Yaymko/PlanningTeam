@@ -111,3 +111,26 @@ def test_parses_status_and_priority_columns():
 def test_legacy_in_work_flag_becomes_status():
     people_data, _ = parse_workbook(_build_sample_workbook())
     assert people_data["Иванов Иван Иванович"]["Статус"].tolist() == ["в работе", ""]
+
+
+def test_new_overview_sheet_names_and_assignees_column_are_ignored():
+    """Новая выгрузка: обзорные листы называются «Обзор 1267» и содержат колонку «Исполнители»."""
+    overview_headers = ["Тикет", "Название", "Колонка", "Исполнители", "Срок", "В работе", *WEEK_LABELS]
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title in ["Обзор 1267", "Сводка доски"]:
+        ws = wb.create_sheet(title)
+        ws.append([f"{title} — справочно"])
+        ws.append(overview_headers)
+        ws.append(["ABC-1", "Сделать штуку", "10 Работа", "Иванов Иван Иванович", None, True, None, None])
+    ws = wb.create_sheet("Обзоров О.")
+    ws.append(["Обзоров Олег Олегович"])
+    ws.append(HEADERS)
+    ws.append(["ABC-1", "Сделать штуку", "10 Работа", "1267", None, True, 2, 0, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    people_data, week_labels = parse_workbook(buf.getvalue())
+
+    assert list(people_data.keys()) == ["Обзоров О."]
+    assert week_labels == WEEK_LABELS

@@ -13,7 +13,9 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-OVERVIEW_PREFIX = "Обзор тикетов"
+# Обзорные листы доски: «Обзор тикетов 1267» в старых выгрузках, «Обзор 1267» — в новых.
+OVERVIEW_SHEET_RE = re.compile(r"^Обзор\b")
+OVERVIEW_ASSIGNEES_COL = "Исполнители"  # колонка есть только в обзорных листах, не в листах исполнителей
 SUMMARY_SHEET_NAME = "Сводка по команде"
 FIXED_COLS = ["Тикет", "Название", "Колонка", "Доска", "Срок", "Статус", "Приоритет"]
 DEFAULT_NORM = 40.0
@@ -68,7 +70,7 @@ def parse_workbook(file_bytes: bytes):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     person_sheets = [
         s for s in wb.sheetnames
-        if not s.startswith(OVERVIEW_PREFIX) and s != SUMMARY_SHEET_NAME
+        if not OVERVIEW_SHEET_RE.match(s) and s != SUMMARY_SHEET_NAME
     ]
 
     people_data = {}
@@ -86,6 +88,8 @@ def parse_workbook(file_bytes: bytes):
             continue
         header = [c.value for c in ws[header_row]]
         idx = {h: i for i, h in enumerate(header) if h is not None}
+        if OVERVIEW_ASSIGNEES_COL in idx:  # обзор по доске с любым названием листа — не исполнитель
+            continue
         # Недели идут сразу после последней из известных колонок тикета («В работе» в старых
         # выгрузках, «Статус»/«Приоритет» — если их добавили в файл).
         known = [idx[h] for h in [*FIXED_COLS, LEGACY_IN_WORK_COL] if h in idx]
