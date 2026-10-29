@@ -174,8 +174,10 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
     """Переносит уже сохранённые часы в свежую выгрузку с доски.
 
     Часы (план и факт) по тикетам переносятся по номеру тикета для недель, которые есть в обеих
-    выгрузках, статус и приоритет — если были заданы. Строки «Доп. работа» с названием, которых нет
-    в новой выгрузке, добавляются в конец.
+    выгрузках, статус и приоритет — если были заданы. Строки «Доп. работа» (без тикета) переносятся,
+    только если в общих неделях у них есть часы (план или факт), — с названием или без. Если в новой
+    выгрузке есть строка без тикета с тем же названием, часы переносятся в неё, иначе строка
+    добавляется в конец. Доп. работы без часов не переносятся.
     """
     new_df = normalize_rows(new_df, week_labels)
     common_weeks = [wl for wl in week_labels if wl in old_df.columns]
@@ -184,28 +186,38 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
     not_week = {*FIXED_COLS, LEGACY_IN_WORK_COL}
     old_df = normalize_rows(old_df, [c for c in old_df.columns if c not in not_week and not is_actual_label(c)])
 
+    def carry(i, old):
+        # Статус и приоритет ставят в планировщике — они важнее отметки из выгрузки.
+        for col in (STATUS_COL, PRIORITY_COL):
+            if old[col]:
+                new_df.at[i, col] = old[col]
+        for col in hour_cols(common_weeks):
+            new_df.at[i, col] = float(old[col])
+
     old_by_ticket = {}
     for _, row in old_df.iterrows():
         if row["Тикет"]:
             old_by_ticket.setdefault(row["Тикет"], row)
     for i, ticket in new_df["Тикет"].items():
         if ticket in old_by_ticket:
-            old = old_by_ticket[ticket]
-            # Статус и приоритет ставят в планировщике — они важнее отметки из выгрузки.
-            for col in (STATUS_COL, PRIORITY_COL):
-                if old[col]:
-                    new_df.at[i, col] = old[col]
-            for col in hour_cols(common_weeks):
-                new_df.at[i, col] = float(old[col])
+            carry(i, old_by_ticket[ticket])
     if not common_weeks:
         return new_df
 
-    existing_titles = set(new_df.loc[new_df["Тикет"] == "", "Название"])
-    extra = old_df[(old_df["Тикет"] == "") & (old_df["Название"] != "")
-                   & ~old_df["Название"].isin(existing_titles)]
-    if not extra.empty:
-        extra = normalize_rows(extra, week_labels)
-        new_df = pd.concat([new_df, extra], ignore_index=True)
+    common_hours = hour_cols(common_weeks)
+    extra = old_df[(old_df["Тикет"] == "") & (old_df[common_hours].abs().sum(axis=1) > 0)]
+    free = {}  # название -> строки новой выгрузки без тикета и без часов, куда можно перенести часы
+    for i, row in new_df[new_df["Тикет"] == ""].iterrows():
+        if row["Название"] and not new_df.loc[i, common_hours].abs().sum():
+            free.setdefault(row["Название"], []).append(i)
+    appended = []
+    for _, old in extra.iterrows():
+        if free.get(old["Название"]):
+            carry(free[old["Название"]].pop(0), old)
+        else:
+            appended.append(old)
+    if appended:
+        new_df = pd.concat([new_df, normalize_rows(pd.DataFrame(appended), week_labels)], ignore_index=True)
     return new_df
 
 

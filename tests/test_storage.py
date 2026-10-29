@@ -213,13 +213,39 @@ def test_empty_rows_are_dropped_on_upload(tmp_path):
     df, _, _ = store.load_person("Иванов")
     assert list(df["Тикет"]) == ["A-1"]
 
-    # Rows with a title, or with hours but no title, are kept; blank placeholders in the next export go.
+    # Extra works with hours in the carried-over weeks are kept, with or without a title; extra works
+    # without hours (titled or not) and blank placeholders in the next export go.
     keep_hours = {**blank, WEEKS[1]: 2.0}
-    keep_title = {**blank, "Название": "Созвоны"}
-    store.save_person("Иванов", _df(WEEKS, [_ticket("A-1", WEEKS, [1, 1]), keep_hours, keep_title]), 40)
+    keep_titled = {**blank, "Название": "Созвоны", WEEKS[1]: 1.5}
+    zero_titled = {**blank, "Название": "Пусто"}
+    store.save_person("Иванов", _df(WEEKS, [_ticket("A-1", WEEKS, [1, 1]), keep_hours, keep_titled,
+                                            zero_titled]), 40)
     nb = {**blank, **dict.fromkeys(NEXT_WEEKS, 0.0)}
     store.save_plan("w2.xlsx", {"Иванов": _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0]), nb, nb])},
                     NEXT_WEEKS)
     df, _, _ = store.load_person("Иванов")
-    assert list(df["Тикет"]) == ["A-1", ""]
-    assert list(df["Название"]) == ["Задача A-1", "Созвоны"]
+    assert list(df["Тикет"]) == ["A-1", "", ""]
+    assert list(df["Название"]) == ["Задача A-1", "", "Созвоны"]
+    assert list(df[NEXT_WEEKS[0]]) == [1.0, 2.0, 1.5]
+
+
+def test_extra_work_hours_go_into_same_titled_row_of_new_export(tmp_path):
+    from core import actual_label
+
+    extra = {"Тикет": "", "Название": "Созвоны", "Колонка": "Доп. работа", "Доска": "", "Срок": None,
+             "Статус": "", **dict.fromkeys(WEEKS, 0.0)}
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    only_fact = {**extra, "Название": "Дежурство", actual_label(WEEKS[1]): 4.0}
+    saved = pd.concat([df, pd.DataFrame([{**extra, WEEKS[1]: 3.0}, only_fact])], ignore_index=True)
+    store.save_person("Иванов", saved, 40)
+
+    # The board export now has its own "Созвоны" row: hours land there instead of a duplicate row.
+    nxt = {**extra, **dict.fromkeys(NEXT_WEEKS, 0.0)}
+    store.save_plan("w2.xlsx", {"Иванов": _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0]), nxt])},
+                    NEXT_WEEKS)
+    df, _, _ = store.load_person("Иванов")
+    assert list(df["Название"]) == ["Задача A-1", "Созвоны", "Дежурство"]
+    assert list(df[NEXT_WEEKS[0]]) == [0.0, 3.0, 0.0]
+    assert df.loc[2, actual_label(NEXT_WEEKS[0])] == 4.0
