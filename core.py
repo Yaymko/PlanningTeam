@@ -175,9 +175,10 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
 
     Часы (план и факт) по тикетам переносятся по номеру тикета для недель, которые есть в обеих
     выгрузках, статус и приоритет — если были заданы. Строки «Доп. работа» (без тикета) переносятся,
-    только если в общих неделях у них есть часы (план или факт), — с названием или без. Если в новой
-    выгрузке есть строка без тикета с тем же названием, часы переносятся в неё, иначе строка
-    добавляется в конец. Доп. работы без часов не переносятся.
+    если у них были часы (план или факт) в любой неделе старого плана, — с названием или без, даже
+    если общих недель нет: часы общих недель переходят вместе со строкой, часы ушедших недель
+    остаются в истории. Если в новой выгрузке есть строка без тикета с тем же названием, часы
+    переносятся в неё, иначе строка добавляется в конец. Доп. работы без часов не переносятся.
     """
     new_df = normalize_rows(new_df, week_labels)
     common_weeks = [wl for wl in week_labels if wl in old_df.columns]
@@ -201,11 +202,10 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
     for i, ticket in new_df["Тикет"].items():
         if ticket in old_by_ticket:
             carry(i, old_by_ticket[ticket])
-    if not common_weeks:
-        return new_df
 
     common_hours = hour_cols(common_weeks)
-    extra = old_df[(old_df["Тикет"] == "") & (old_df[common_hours].abs().sum(axis=1) > 0)]
+    old_hours = [c for c in old_df.columns if c not in FIXED_COLS]
+    extra = old_df[(old_df["Тикет"] == "") & (old_df[old_hours].abs().sum(axis=1) > 0)]
     free = {}  # название -> строки новой выгрузки без тикета и без часов, куда можно перенести часы
     for i, row in new_df[new_df["Тикет"] == ""].iterrows():
         if row["Название"] and not new_df.loc[i, common_hours].abs().sum():
