@@ -270,3 +270,31 @@ def test_extra_work_with_hours_only_in_dropped_weeks_is_kept(tmp_path):
     df, _, _ = store.load_person("Иванов")
     assert list(df["Название"]) == ["Задача A-1", "Созвоны"]
     assert df[later].to_numpy().sum() == 0  # hours of the dropped weeks are in the history
+
+
+def test_short_names_in_new_export_match_full_names(tmp_path):
+    extra = {"Тикет": "", "Название": "", "Колонка": "Доп. работа", "Доска": "", "Срок": None,
+             "Статус": "", **dict.fromkeys(WEEKS, 0.0)}
+    full, short = "Панькин Александр Викторович", "Панькин А."
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {full: _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS)
+    df, _, _ = store.load_person(full)
+    df.loc[0, "Статус"] = "пауза"
+    rows = [{**extra, "Название": "Созвоны", WEEKS[0]: 2.0, WEEKS[1]: 1.0}]
+    store.save_person(full, pd.concat([df, pd.DataFrame(rows)], ignore_index=True), 32)
+
+    # The new export names people shortly and has «Доп. работа» placeholders with that title.
+    placeholder = {**extra, "Название": "Доп. работа", **dict.fromkeys(NEXT_WEEKS, 0.0)}
+    store.save_plan("w2.xlsx", {short: _df(NEXT_WEEKS, [_ticket("A-1", NEXT_WEEKS, [0, 0]), placeholder])},
+                    NEXT_WEEKS, today=date(2026, 10, 6))
+    df, norm, _ = store.load_person(short)
+    assert norm == 32.0
+    assert list(df["Название"]) == ["Задача A-1", "Созвоны"]
+    assert df.loc[0, "Статус"] == "пауза"
+    assert df.loc[1, NEXT_WEEKS[0]] == 1.0
+
+    # A week archived under the full name comes back to the short-named person.
+    store.save_plan("w1.xlsx", {short: _df(WEEKS, [_ticket("A-1", WEEKS, [0, 0])])}, WEEKS,
+                    today=date(2026, 10, 6))
+    df, _, _ = store.load_person(short)
+    assert df.loc[df["Название"] == "Созвоны", WEEKS[0]].tolist() == [2.0]

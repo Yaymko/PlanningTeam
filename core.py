@@ -150,6 +150,7 @@ def normalize_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
 
 
 DELETE_COL = "Удалить"
+EXTRA_WORK = "Доп. работа"
 
 
 def drop_marked_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -161,12 +162,14 @@ def drop_marked_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def drop_empty_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
-    """Убирает пустые строки: без тикета, без названия и без часов (план и факт) по всем неделям.
+    """Убирает пустые строки: без тикета, без часов (план и факт) по всем неделям и без названия
+    (или с названием-заготовкой «Доп. работа»).
     Такие строки-заготовки «Доп. работа» приходят в каждой выгрузке с доски; новые строки
     сотрудник добавляет кнопкой «+» в таблице."""
     df = normalize_rows(df, week_labels)
     hours = df[hour_cols(week_labels)].abs().sum(axis=1) if week_labels else 0
-    empty = (df["Тикет"].str.strip() == "") & (df["Название"].str.strip() == "") & (hours == 0)
+    title = df["Название"].str.strip()
+    empty = (df["Тикет"].str.strip() == "") & ((title == "") | (title == EXTRA_WORK)) & (hours == 0)
     return df[~empty].reset_index(drop=True)
 
 

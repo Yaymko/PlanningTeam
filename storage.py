@@ -25,7 +25,7 @@ from core import (
     sort_by_priority,
     week_key,
 )
-from fact import DATE_COL, FACT_COLS, plan_week_label, split_by_week
+from fact import DATE_COL, FACT_COLS, match_people, plan_week_label, split_by_week
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "team_load.db"
 
@@ -169,6 +169,9 @@ class Store:
                         "updated_at, file_name, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (week_key(wl, today), wl, name, position, rows_to_json(week_df, [wl]), norm,
                          updated_at, old_plan["file_name"], _now()))
+            # Имена в выгрузках бывают то полными, то короткими («Панькин А.» и «Панькин Александр
+            # Викторович»): старые данные ищутся по точному имени, а если его нет — по фамилии и инициалам.
+            old_name = match_people(people_data, old)
             history = {}
             if returned:
                 marks = ",".join("?" * len(returned))
@@ -179,14 +182,17 @@ class Store:
                         rows_from_json(rows, [label]).rename(columns={
                             label: returned[key], actual_label(label): actual_label(returned[key])}))
                 conn.execute(f"DELETE FROM week_history WHERE week_key IN ({marks})", list(returned))
+            history_by_name = {}
+            for hist_name, name in match_people(history, people_data).items():
+                history_by_name.setdefault(name, []).extend(history[hist_name])
             conn.execute("DELETE FROM people")
             for position, (name, df) in enumerate(people_data.items()):
                 norm, updated_at = DEFAULT_NORM, None
-                if name in old:
-                    old_rows, norm, old_updated, _ = old[name]
+                if name in old_name:
+                    old_rows, norm, old_updated, _ = old[old_name[name]]
                     df = merge_saved_hours(df, rows_from_json(old_rows, old_weeks), week_labels)
                     updated_at = old_updated if same_weeks else None
-                for hist_df in history.get(name, []):
+                for hist_df in history_by_name.get(name, []):
                     df = merge_saved_hours(df, hist_df, week_labels)
                 df = drop_empty_rows(df, week_labels)
                 conn.execute(
