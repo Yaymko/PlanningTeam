@@ -132,5 +132,77 @@ def test_new_overview_sheet_names_and_assignees_column_are_ignored():
 
     people_data, week_labels = parse_workbook(buf.getvalue())
 
-    assert list(people_data.keys()) == ["Обзоров О."]
+    # Полное ФИО из строки над шапкой того же человека, что и в названии листа.
+    assert list(people_data.keys()) == ["Обзоров Олег Олегович"]
     assert week_labels == WEEK_LABELS
+
+
+def _build_new_format_workbook(hours=None) -> bytes:
+    """Выгрузка с ноября 2026: одна неделя «16.11–22.11, ч», без колонок «В работе» и «Итого, ч.»,
+    лист назван коротко, полное ФИО — в строке над шапкой, итоговая строка «Итого, ч.»."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    ov = wb.create_sheet("Обзор 1267")
+    ov.append(["Доска 1267 — статус на 12.11.2026"])
+    ov.append(["Тикет", "Название", "Колонка", "Исполнители", "Срок"])
+    ov.append(["ABC-1", "Сделать штуку", "10 Работа", "Панькин Александр Викторович", None])
+    ws = wb.create_sheet("Панькин А. В.")
+    ws.append(["Панькин Александр Викторович"])
+    ws.append(["Тикет", "Название", "Колонка", "Доска", "Срок", "16.11–22.11, ч"])
+    ws.append(["ABC-1", "Сделать штуку", "10 Работа", "1267", None, hours])
+    ws.append([None, "Доп. работа", "Доп. работа", None, None, None])
+    ws.append(["Итого, ч.", None, None, None, None, "=SUM(F3:F4)"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parses_new_single_week_format():
+    people_data, week_labels = parse_workbook(_build_new_format_workbook(hours=3))
+
+    assert week_labels == ["16.11–22.11 ч"]  # «, ч» приводится к старому виду «… ч»
+    assert list(people_data) == ["Панькин Александр Викторович"]
+    df = people_data["Панькин Александр Викторович"]
+    assert list(df["Тикет"]) == ["ABC-1", ""]
+    assert df.loc[0, "16.11–22.11 ч"] == 3.0
+    assert df.loc[1, "Название"] == "Доп. работа"
+    assert df.loc[0, "Статус"] != "в работе"  # колонки «В работе» нет
+
+
+def test_week_label_helpers_accept_comma_suffix():
+    from core import actual_label, canonical_week_label, clean_week_label, is_week_header
+
+    assert canonical_week_label("16.11–22.11, ч") == "16.11–22.11 ч"
+    assert canonical_week_label("28.09–04.10 ч") == "28.09–04.10 ч"
+    assert clean_week_label("16.11–22.11, ч") == "16.11–22.11"
+    assert actual_label("16.11–22.11, ч") == "16.11–22.11 факт, ч"
+    assert is_week_header("16.11–22.11, ч") and is_week_header("28.09–04.10 ч")
+    assert not is_week_header("Итого, ч.") and not is_week_header("Срок")
+
+
+def test_new_format_upload_keeps_data_saved_under_short_name(tmp_path):
+    """Часы, норма и доп. работы, сохранённые под коротким именем, переходят к полному ФИО."""
+    from datetime import date
+
+    import pandas as pd
+
+    from storage import Store
+
+    week = "16.11–22.11 ч"
+    store = Store(tmp_path / "db.sqlite")
+    first, _ = parse_workbook(_build_new_format_workbook())
+    short = {"Панькин А.": first["Панькин Александр Викторович"]}
+    store.save_plan("old.xlsx", short, [week], today=date(2026, 11, 12))
+    df, _, _ = store.load_person("Панькин А.")
+    df.loc[0, week] = 5.0
+    extra = {c: "" for c in df.columns} | {"Колонка": "Доп. работа", "Название": "Созвоны", "Срок": None,
+                                            week: 2.0, "16.11–22.11 факт, ч": 0.0}
+    store.save_person("Панькин А.", pd.concat([df, pd.DataFrame([extra])], ignore_index=True), 32)
+
+    people_data, week_labels = parse_workbook(_build_new_format_workbook())
+    store.save_plan("new.xlsx", people_data, week_labels, today=date(2026, 11, 12))
+
+    df, norm, _ = store.load_person("Панькин Александр Викторович")
+    assert norm == 32.0
+    assert df.loc[df["Тикет"] == "ABC-1", week].tolist() == [5.0]
+    assert df.loc[df["Название"] == "Созвоны", week].tolist() == [2.0]
