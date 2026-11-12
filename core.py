@@ -222,7 +222,8 @@ def drop_empty_rows(df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
     return df[~empty].reset_index(drop=True)
 
 
-def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: list) -> pd.DataFrame:
+def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: list,
+                      keep_titles=frozenset()) -> pd.DataFrame:
     """Переносит уже сохранённые часы в свежую выгрузку с доски.
 
     Часы (план и факт) по тикетам переносятся по номеру тикета для недель, которые есть в обеих
@@ -230,7 +231,9 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
     если у них были часы (план или факт) в любой неделе старого плана, — с названием или без, даже
     если общих недель нет: часы общих недель переходят вместе со строкой, часы ушедших недель
     остаются в истории. Если в новой выгрузке есть строка без тикета с тем же названием, часы
-    переносятся в неё, иначе строка добавляется в конец. Доп. работы без часов не переносятся.
+    переносятся в неё, иначе строка добавляется в конец. Доп. работа без часов в старом плане
+    переносится, если её название есть в keep_titles (были часы в прошлых неделях из истории),
+    остальные доп. работы без часов не переносятся.
     """
     new_df = normalize_rows(new_df, week_labels)
     common_weeks = [wl for wl in week_labels if wl in old_df.columns]
@@ -257,7 +260,9 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
 
     common_hours = hour_cols(common_weeks)
     old_hours = [c for c in old_df.columns if c not in FIXED_COLS]
-    extra = old_df[(old_df["Тикет"] == "") & (old_df[old_hours].abs().sum(axis=1) > 0)]
+    titles = old_df["Название"].str.strip()
+    had_hours = (old_df[old_hours].abs().sum(axis=1) > 0) | (titles.isin(keep_titles) & (titles != EXTRA_WORK))
+    extra = old_df[(old_df["Тикет"] == "") & had_hours]
     free = {}  # название -> строки новой выгрузки без тикета и без часов, куда можно перенести часы
     for i, row in new_df[new_df["Тикет"] == ""].iterrows():
         if row["Название"] and not new_df.loc[i, common_hours].abs().sum():
