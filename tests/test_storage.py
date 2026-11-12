@@ -298,3 +298,34 @@ def test_short_names_in_new_export_match_full_names(tmp_path):
                     today=date(2026, 10, 6))
     df, _, _ = store.load_person(short)
     assert df.loc[df["Название"] == "Созвоны", WEEKS[0]].tolist() == [2.0]
+
+
+def test_extra_work_with_past_hours_survives_next_single_week_uploads(tmp_path):
+    """Выгрузка на одну неделю: прошлая неделя каждый раз уходит в историю, но доп. работа с часами
+    в прошлых неделях не пропадает ни при следующей, ни при повторной загрузке. Доп. работа без
+    часов нигде и строка, удалённая сотрудником, не возвращаются."""
+    weeks = ["09.11–15.11 ч", "16.11–22.11 ч"]
+    week = ["16.11–22.11 ч"]
+    nxt = ["23.11–29.11 ч"]
+    extra = {"Тикет": "", "Колонка": "Доп. работа", "Доска": "", "Срок": None, "Статус": ""}
+    store = Store(tmp_path / "db.sqlite")
+    store.save_plan("w1.xlsx", {"Иванов": _df(weeks, [_ticket("A-1", weeks, [0, 0])])}, weeks,
+                    today=date(2026, 11, 12))
+    df, _, _ = store.load_person("Иванов")
+    rows = [{**extra, "Название": "Прошлая", weeks[0]: 3.0, weeks[1]: 0.0},
+            {**extra, "Название": "Без часов", weeks[0]: 0.0, weeks[1]: 0.0}]
+    store.save_person("Иванов", pd.concat([df, pd.DataFrame(rows)], ignore_index=True), 40)
+
+    def upload(labels, today):
+        placeholder = {**extra, "Название": "Доп. работа", **dict.fromkeys(labels, 0.0)}
+        store.save_plan("w.xlsx", {"Иванов": _df(labels, [_ticket("A-1", labels, [0]), placeholder])}, labels,
+                        today=today)
+        return list(store.load_person("Иванов")[0]["Название"])
+
+    assert upload(week, date(2026, 11, 12)) == ["Задача A-1", "Прошлая"]
+    assert upload(week, date(2026, 11, 13)) == ["Задача A-1", "Прошлая"]  # повторная загрузка
+    assert upload(nxt, date(2026, 11, 19)) == ["Задача A-1", "Прошлая"]  # следующая неделя
+
+    df, _, _ = store.load_person("Иванов")
+    store.save_person("Иванов", df[df["Название"] != "Прошлая"], 40)
+    assert upload(nxt, date(2026, 11, 20)) == ["Задача A-1"]

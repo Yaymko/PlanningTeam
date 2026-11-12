@@ -22,6 +22,7 @@ from core import (
     hour_cols,
     merge_saved_hours,
     normalize_rows,
+    same_person,
     sort_by_priority,
     week_key,
 )
@@ -182,6 +183,14 @@ class Store:
                         rows_from_json(rows, [label]).rename(columns={
                             label: returned[key], actual_label(label): actual_label(returned[key])}))
                 conn.execute(f"DELETE FROM week_history WHERE week_key IN ({marks})", list(returned))
+            # Доп. работы, у которых были часы в прошлых неделях (они уже в истории), остаются в плане,
+            # даже если в неделях старого плана у них часов нет: так строки не пропадают, когда
+            # в выгрузке одна неделя и прошлая неделя каждый раз уходит в историю.
+            past_titles = {}
+            for hist_name, rows, label in conn.execute("SELECT name, rows, week_label FROM week_history"):
+                hist_df = rows_from_json(rows, [label])
+                worked = hist_df[(hist_df["Тикет"] == "") & (hist_df[hour_cols([label])].abs().sum(axis=1) > 0)]
+                past_titles.setdefault(hist_name, set()).update(t for t in worked["Название"].str.strip() if t)
             history_by_name = {}
             for hist_name, name in match_people(history, people_data).items():
                 history_by_name.setdefault(name, []).extend(history[hist_name])
@@ -190,7 +199,9 @@ class Store:
                 norm, updated_at = DEFAULT_NORM, None
                 if name in old_name:
                     old_rows, norm, old_updated, _ = old[old_name[name]]
-                    df = merge_saved_hours(df, rows_from_json(old_rows, old_weeks), week_labels)
+                    keep = set().union(*(t for n, t in past_titles.items()
+                                         if n == old_name[name] or same_person(n, old_name[name])))
+                    df = merge_saved_hours(df, rows_from_json(old_rows, old_weeks), week_labels, keep)
                     updated_at = old_updated if same_weeks else None
                 for hist_df in history_by_name.get(name, []):
                     df = merge_saved_hours(df, hist_df, week_labels)
