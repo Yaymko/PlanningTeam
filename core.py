@@ -48,9 +48,24 @@ def sort_by_priority(df: pd.DataFrame) -> pd.DataFrame:
     return df.iloc[rank.argsort(kind="stable")].reset_index(drop=True)
 
 
+# Заголовок колонки недели: «28.09–04.10 ч» в старых выгрузках, «16.11–22.11, ч» — в новых.
+WEEK_HEADER_RE = re.compile(r"^\s*\d{1,2}\.\d{1,2}\s*[–—-]\s*\d{1,2}\.\d{1,2}[,\s]*ч\.?\s*$")
+_HOURS_SUFFIX_RE = re.compile(r"[,\s]*ч\.?\s*$")
+
+
+def is_week_header(value) -> bool:
+    return isinstance(value, str) and bool(WEEK_HEADER_RE.match(value))
+
+
+def canonical_week_label(label: str) -> str:
+    """Заголовок недели в одном виде для всех выгрузок: «16.11–22.11, ч» -> «16.11–22.11 ч».
+    Так часы и история недель совпадают, как бы ни был подписан столбец в файле."""
+    return _HOURS_SUFFIX_RE.sub("", str(label)).strip() + " ч"
+
+
 def actual_label(week_label: str) -> str:
     """Колонка фактических часов для недели: «28.09–04.10 ч» -> «28.09–04.10 факт, ч»."""
-    return re.sub(r"\s*ч\.?$", "", str(week_label)).strip() + ACTUAL_SUFFIX
+    return _HOURS_SUFFIX_RE.sub("", str(week_label)).strip() + ACTUAL_SUFFIX
 
 
 def is_actual_label(col) -> bool:
@@ -63,6 +78,34 @@ def hour_cols(week_labels: list) -> list:
     for wl in week_labels:
         cols += [wl, actual_label(wl)]
     return cols
+
+
+def name_parts(name: str) -> list:
+    return [p for p in re.split(r"[\s.]+", str(name).lower().replace("ё", "е")) if p]
+
+
+def same_person(a: str, b: str) -> bool:
+    """Фамилия совпадает, имя и отчество — если указаны у обоих — совпадают или одно из них инициал.
+    «Иванов Иван» = «Иванов Иван Петрович», «Кузнецов А.Б.» = «Кузнецов Андрей Борисович»."""
+    pa, pb = name_parts(a), name_parts(b)
+    if not pa or not pb or pa[0] != pb[0]:
+        return False
+    for x, y in zip(pa[1:3], pb[1:3]):
+        if x != y and not ((len(x) == 1 or len(y) == 1) and x[0] == y[0]):
+            return False
+    return True
+
+
+def _person_name(sheet_name: str, title) -> str:
+    """Имя исполнителя: полное ФИО из строки-заголовка над шапкой, если это ФИО того же человека,
+    что и в названии листа (лист «Калабина М. А.», заголовок «Калабина Мария Алексеевна»),
+    иначе — название листа."""
+    if isinstance(title, str):
+        title = " ".join(title.split())
+        if (len(title) > len(sheet_name) and 2 <= len(title.split()) <= 3
+                and same_person(title, sheet_name)):
+            return title
+    return sheet_name
 
 
 def parse_workbook(file_bytes: bytes):
@@ -91,13 +134,19 @@ def parse_workbook(file_bytes: bytes):
         if OVERVIEW_ASSIGNEES_COL in idx:  # обзор по доске с любым названием листа — не исполнитель
             continue
         # Недели идут сразу после последней из известных колонок тикета («В работе» в старых
-        # выгрузках, «Статус»/«Приоритет» — если их добавили в файл).
+        # выгрузках, «Статус»/«Приоритет» — если их добавили в файл) и заканчиваются перед
+        # «Итого, ч.» (в новых выгрузках этой колонки нет — тогда до последней колонки-недели).
         known = [idx[h] for h in [*FIXED_COLS, LEGACY_IN_WORK_COL] if h in idx]
         start_week_col = max(known) + 1
-        end_week_col = idx.get("Итого, ч.", len(header) - 1)
-        this_week_labels = [header[i] for i in range(start_week_col, end_week_col)]
+        week_cols = []
+        for i in range(start_week_col, len(header)):
+            if not is_week_header(header[i]):
+                break
+            week_cols.append(i)
+        this_week_labels = [canonical_week_label(header[i]) for i in week_cols]
         if week_labels is None:
             week_labels = this_week_labels
+        person = _person_name(name, ws.cell(row=1, column=1).value if header_row > 1 else None)
 
         rows = []
         for r in range(header_row + 1, ws.max_row + 1):
@@ -118,13 +167,13 @@ def parse_workbook(file_bytes: bytes):
                 row[STATUS_COL] = status_from_legacy(ws.cell(row=r, column=idx[LEGACY_IN_WORK_COL] + 1).value)
             if PRIORITY_COL in idx:
                 row[PRIORITY_COL] = ws.cell(row=r, column=idx[PRIORITY_COL] + 1).value or ""
-            for wi, wl in enumerate(this_week_labels):
-                v = ws.cell(row=r, column=start_week_col + 1 + wi).value
+            for ci, wl in zip(week_cols, this_week_labels):
+                v = ws.cell(row=r, column=ci + 1).value
                 row[wl] = float(v) if isinstance(v, (int, float)) else 0.0
             rows.append(row)
 
         df = pd.DataFrame(rows, columns=FIXED_COLS + this_week_labels)
-        people_data[name] = df
+        people_data[person] = df
 
     return people_data, (week_labels or [])
 
@@ -225,7 +274,7 @@ def merge_saved_hours(new_df: pd.DataFrame, old_df: pd.DataFrame, week_labels: l
 
 
 def clean_week_label(label: str) -> str:
-    return re.sub(r"\s*ч\.?$", "", str(label)).strip()
+    return _HOURS_SUFFIX_RE.sub("", str(label)).strip()
 
 
 def _week_range(label: str, today: date):

@@ -3,13 +3,12 @@
 и сравнение их с планом из планировщика. Без зависимостей от Streamlit.
 """
 import io
-import re
 from datetime import date, datetime, timedelta
 
 import openpyxl
 import pandas as pd
 
-from core import actual_label, week_key
+from core import actual_label, same_person, week_key
 
 NAME_COL = "Фамилия И.О."
 DATE_COL = "Дата"
@@ -91,20 +90,7 @@ def week_title(key: str) -> str:
 
 # --- сопоставление сотрудников ---------------------------------------------------------
 
-def _name_parts(name: str) -> list:
-    return [p for p in re.split(r"[\s.]+", str(name).lower().replace("ё", "е")) if p]
-
-
-def _same_person(a: str, b: str) -> bool:
-    """Фамилия совпадает, имя и отчество — если указаны у обоих — совпадают или одно из них инициал.
-    «Иванов Иван» = «Иванов Иван Петрович», «Кузнецов А.Б.» = «Кузнецов Андрей Борисович»."""
-    pa, pb = _name_parts(a), _name_parts(b)
-    if not pa or not pb or pa[0] != pb[0]:
-        return False
-    for x, y in zip(pa[1:3], pb[1:3]):
-        if x != y and not ((len(x) == 1 or len(y) == 1) and x[0] == y[0]):
-            return False
-    return True
+_same_person = same_person
 
 
 def match_people(fact_names, plan_names) -> dict:
