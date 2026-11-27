@@ -5,6 +5,8 @@
 Сотрудники заранее заполняют свои часы во вкладке «Мои часы» и сохраняют их в общую базу;
 на встрече во вкладке «Планирование» видны часы всех и выгружается отчёт на неделю.
 """
+import os
+import time
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -44,6 +46,9 @@ from table_filter import apply_filter, filter_controls, filter_table, merge_view
 
 st.set_page_config(page_title="Загрузка команды", layout="wide")
 
+# Через сколько секунд после последней правки в «Мои часы» часы сохраняются сами.
+AUTOSAVE_DELAY = float(os.environ.get("TEAM_LOAD_AUTOSAVE_SECONDS", "5"))
+
 ROW_ID = "_row_id"  # hidden row id that ties edits in a filtered editor back to the full table
 
 
@@ -81,6 +86,80 @@ def status_reference(store):
                 st.rerun()
 
 
+def planned_works(df, weeks, week=None):
+    """Работы сотрудника с плановыми часами: на неделе week или хотя бы на одной из weeks."""
+    cols = [week] if week else list(weeks)
+    hours = df[cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+    works = df[hours.sum(axis=1) > 0]
+    out = works[["Тикет", "Название", STATUS_COL, PRIORITY_COL, "Срок"]].copy()
+    out["Срок"] = pd.to_datetime(out["Срок"])
+    for wl in cols:
+        out[f"{clean_week_label(wl)} план"] = works[wl]
+        out[f"{clean_week_label(wl)} факт"] = works[actual_label(wl)]
+    return sort_by_priority(out).reset_index(drop=True)
+
+
+def person_works(name, df, weeks, week=None):
+    """Список запланированных работ сотрудника под сводкой (по клику на его часы)."""
+    period = f"на неделю {clean_week_label(week)}" if week else "на показанные недели"
+    st.markdown(f"#### Работы сотрудника {name} {period}")
+    works = planned_works(df, weeks, week)
+    if works.empty:
+        st.info(f"У сотрудника {name} нет работ с плановыми часами {period}.")
+        return
+    hour_columns = [c for c in works.columns if c.endswith((" план", " факт"))]
+    st.dataframe(works.style.format("{:g}", subset=hour_columns), use_container_width=True, hide_index=True,
+                 column_config={"Срок": st.column_config.DateColumn(format="DD.MM.YYYY")})
+    plan_cols = [c for c in hour_columns if c.endswith(" план")]
+    st.caption(f"Работ: {len(works)}. Плановых часов: "
+               + ", ".join(f"{c[:-5]} — {works[c].sum():g} ч" for c in plan_cols) + ".")
+
+
+def plan_id(plan):
+    """Чем отличается один загруженный план недели от другого."""
+    return (plan["uploaded_at"], plan["file_name"], tuple(plan["week_labels"])) if plan else None
+
+
+def run_autosave(store, works, now=None):
+    """Сохраняет таблицы «Мои часы», в которых правки не менялись дольше AUTOSAVE_DELAY секунд.
+    Таблицы от прошлого плана недели не сохраняются, чтобы не затереть новый план."""
+    now = time.monotonic() if now is None else now
+    plan = store.get_plan()
+    for work in works.values():
+        pending = work.get("pending")
+        if not pending or now - work["changed_at"] < AUTOSAVE_DELAY:
+            continue
+        work["pending"] = None
+        if plan is None or plan_id(plan) != work["plan"]:
+            continue
+        kept, norm, sig = pending
+        try:
+            store.save_person(work["person"], kept, norm)
+        except KeyError:
+            continue
+        work["saved_sig"] = sig
+        work["saved_at"] = store.load_person(work["person"])[2]
+        work["autosaved"] = True
+
+
+@st.fragment(run_every=1)
+def autosave_status(saved_at):
+    """Раз в секунду: автосохранение отложенных правок и строка о том, сохранены ли часы."""
+    works = st.session_state.get("filter_works", {})
+    run_autosave(store, works)
+    current = store.get_plan()
+    work = next((w for w in works.values() if w.get("person") == st.session_state.get("my_hours_person")
+                 and current and w.get("plan") == plan_id(current)), None) or {"saved_at": saved_at}
+    if work.get("pending"):
+        left = max(0.0, AUTOSAVE_DELAY - (time.monotonic() - work["changed_at"]))
+        st.warning(f"Есть несохранённые изменения — сохранятся автоматически через {left:.0f} с.")
+    elif work.get("saved_at"):
+        how = "автоматически " if work.get("autosaved") else ""
+        st.success(f"Ваши часы сохранены {how}{fmt_saved(work['saved_at'])}. Можно вносить изменения дальше.")
+    else:
+        st.warning("Вы ещё не сохраняли часы на эту неделю.")
+
+
 def fmt_saved(ts):
     if not ts:
         return "—"
@@ -110,7 +189,8 @@ with tab_mine:
                    "Чтобы убрать тикет или работу, отметьте "
                    "галочку «Удалить» в начале строки: строка удалится при сохранении. Статус и приоритет "
                    "выбираются из списка; после сохранения строки встают по приоритету — «срочно» наверху.")
-        selected = st.selectbox("Сотрудник", store.people(), index=None, placeholder="Выберите себя из списка")
+        selected = st.selectbox("Сотрудник", store.people(), index=None, placeholder="Выберите себя из списка",
+                                key="my_hours_person")
         status_reference(store)
         if selected:
             # The editor's baseline must stay identical across reruns, otherwise Streamlit resets
@@ -130,10 +210,7 @@ with tab_mine:
                 baselines[editor_key] = (df, norm, saved_at)
             base_df, saved_norm, saved_at = baselines[editor_key]
 
-            if saved_at:
-                st.success(f"Ваши часы сохранены {fmt_saved(saved_at)}. Можно поправить и сохранить ещё раз.")
-            else:
-                st.warning("Вы ещё не сохраняли часы на эту неделю.")
+            autosave_status(saved_at)
 
             norm_val = st.number_input("Норма часов в неделю", min_value=0.0, value=float(saved_norm), step=1.0,
                                        help="Уменьшите, если часть недели в отпуске или на больничном.",
@@ -173,15 +250,15 @@ with tab_mine:
             works = st.session_state.setdefault("filter_works", {})
             if editor_key not in works:
                 works[editor_key] = {"full": base_df.assign(**{ROW_ID: range(len(base_df))}),
-                                     "spec": None, "merged": None, "gen": 0, "carried": False,
-                                     "view_dirty": False}
+                                     "spec": None, "merged": None, "gen": 0,
+                                     "person": selected, "plan": plan_id(plan), "saved_at": saved_at,
+                                     "saved_sig": None, "last_sig": None, "changed_at": None, "pending": None}
             work = works[editor_key]
             labels = {c: column_config[c]["label"] for c in hour_cols(shown_weeks)}
             spec = filter_controls(work["full"], key=f"filter_{editor_key}", columns=column_order[1:],
                                    labels=labels)
             if spec != work["spec"]:
                 if work["merged"] is not None:
-                    work["carried"] = work["carried"] or work["view_dirty"]
                     work["full"] = work["merged"]
                 work["spec"], work["gen"] = spec, work["gen"] + 1
             view = apply_filter(work["full"], spec)
@@ -210,12 +287,18 @@ with tab_mine:
                            delta_color="inverse" if delta > 0 else "off")
                 col.caption(f"Факт: {actual:g} ч")
 
-            editor_state = st.session_state.get(view_key, {})
-            work["view_dirty"] = any(editor_state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows"))
-            dirty = work["view_dirty"] or work["carried"] or norm_val != float(saved_norm)
-            if dirty:
-                st.caption(":orange[Есть несохранённые изменения.]")
+            # Автосохранение: запоминаем, что сейчас в таблице; если это отличается от сохранённого,
+            # фрагмент autosave_status сохранит часы через AUTOSAVE_DELAY секунд после последней правки.
+            sig = (kept.to_json(date_format="iso", default_handler=str), float(norm_val))
+            if work["saved_sig"] is None:  # first run: the table is exactly what is in the base
+                work["saved_sig"] = (sig[0], float(saved_norm))
+            if sig != work["last_sig"]:
+                work["last_sig"], work["changed_at"] = sig, time.monotonic()
+            work["pending"] = (kept, float(norm_val), sig) if sig != work["saved_sig"] else None
 
+            st.caption(f"Часы сохраняются автоматически через {AUTOSAVE_DELAY:g} с после последней правки. "
+                       "Кнопка «Сохранить» сохраняет сразу, удаляет отмеченные строки из таблицы и расставляет "
+                       "строки по приоритету.")
             if st.button("Сохранить", type="primary"):
                 store.save_person(selected, kept, norm_val)
                 versions[selected] = ver + 1
@@ -239,6 +322,7 @@ with tab_planning:
             else:
                 store.save_plan(uploaded.name, people_data, week_labels)
                 st.session_state.pop("baselines", None)
+                st.session_state.pop("filter_works", None)
                 st.rerun()
 
     if plan:
@@ -298,11 +382,19 @@ with tab_planning:
                     styles.append("background-color:#D9EAD3")
             return styles
 
-        shown_summary = filter_table(summary, key="filter_planning_summary")
+        shown_summary = filter_table(summary, key="filter_planning_summary").reset_index(drop=True)
         styled = (shown_summary.style.apply(highlight_load, axis=1)
                   .format(precision=2, subset=paired_cols)
                   .format("{:g}", subset=["Норма, ч/нед"]))
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.caption("Нажмите на часы сотрудника (или на его имя), чтобы открыть список запланированных у него работ.")
+        picked = st.dataframe(styled, use_container_width=True, hide_index=True, key="planning_summary",
+                              on_select="rerun", selection_mode="single-cell")
+        cells = picked.selection.get("cells", []) if picked else []
+        if cells and 0 <= cells[0][0] < len(shown_summary):
+            row_pos, col = cells[0]
+            person = shown_summary.iloc[row_pos]["Сотрудник"]
+            week_by_col = {**dict(zip(week_cols, shown_weeks)), **dict(zip(fact_cols, shown_weeks))}
+            person_works(person, everyone[person][0], shown_weeks, week_by_col.get(col))
 
         if not summary.empty:
             col1, col2 = st.columns(2)
