@@ -270,3 +270,71 @@ def test_planning_shows_only_three_nearest_weeks(monkeypatch, tmp_path):
     assert all(w in summary.columns for w in shown[1:4]) and shown[4] not in summary.columns
     next(b for b in at.button if b.label == "Сформировать Excel").click().run()
     assert not at.exception
+
+
+def test_click_on_planned_hours_opens_person_works(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _two_ticket_people(), WEEK_LABELS)
+    at = _app(monkeypatch, db)
+    at.run()
+    assert not any("Работы сотрудника" in m.value for m in at.markdown)
+
+    week1 = WEEK_LABELS[0][:-2]
+    at.session_state["planning_summary"] = {"selection": {"rows": [], "columns": [], "cells": [[1, week1]]}}
+    at.run()
+    assert not at.exception
+    assert any(f"Работы сотрудника Петрова Анна на неделю {week1}" in m.value for m in at.markdown)
+    works = at.dataframe[1].value
+    assert works["Тикет"].tolist() == ["ABC-1", "ABC-2"]
+    assert works[f"{week1} план"].tolist() == [4.0, 2.0]
+
+    # Second week has no planned hours: the list says so instead of an empty table.
+    week2 = WEEK_LABELS[1][:-2]
+    at.session_state["planning_summary"] = {"selection": {"rows": [], "columns": [], "cells": [[0, week2]]}}
+    at.run()
+    assert not at.exception
+    assert any("У сотрудника Иванов Иван нет работ с плановыми часами" in i.value for i in at.info)
+
+    # Click on the name: works with plan hours on any shown week.
+    at.session_state["planning_summary"] = {"selection": {"rows": [], "columns": [], "cells": [[0, "Сотрудник"]]}}
+    at.run()
+    assert any("Работы сотрудника Иванов Иван на показанные недели" in m.value for m in at.markdown)
+
+
+def test_my_hours_autosave_after_delay(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    Store(db).save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    monkeypatch.setenv("TEAM_LOAD_AUTOSAVE_SECONDS", "3600")
+    at = _app(monkeypatch, db)
+    at.run()
+    at.selectbox[0].select("Иванов Иван").run()
+    at.number_input[0].set_value(32.0).run()
+    at.run()
+    assert not at.exception
+    assert any("Есть несохранённые изменения" in w.value for w in at.warning)
+    assert not Store(db).load_person("Иванов Иван")[2]  # delay not passed: nothing saved yet
+
+    monkeypatch.setenv("TEAM_LOAD_AUTOSAVE_SECONDS", "0")
+    at.run()
+    assert not at.exception
+    _, norm, saved_at = Store(db).load_person("Иванов Иван")
+    assert norm == 32.0 and saved_at
+    at.run()
+    assert any("сохранены автоматически" in s.value for s in at.success)
+
+
+def test_autosave_skips_edits_made_for_previous_plan(monkeypatch, tmp_path):
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    store.save_plan("board.xlsx", _plan_people(), WEEK_LABELS)
+    monkeypatch.setenv("TEAM_LOAD_AUTOSAVE_SECONDS", "3600")
+    at = _app(monkeypatch, db)
+    at.run()
+    at.selectbox[0].select("Иванов Иван").run()
+    at.number_input[0].set_value(32.0).run()
+
+    store.save_plan("board2.xlsx", _plan_people(), WEEK_LABELS)  # someone uploads a new plan meanwhile
+    monkeypatch.setenv("TEAM_LOAD_AUTOSAVE_SECONDS", "0")
+    at.run()
+    assert not at.exception
+    assert Store(db).load_person("Иванов Иван")[1] == 40.0
