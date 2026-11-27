@@ -155,7 +155,7 @@ def autosave_status(saved_at):
         st.warning(f"Есть несохранённые изменения — сохранятся автоматически через {left:.0f} с.")
     elif work.get("saved_at"):
         how = "автоматически " if work.get("autosaved") else ""
-        st.success(f"Ваши часы сохранены {how}{fmt_saved(work['saved_at'])}. Можно поправлять дальше.")
+        st.success(f"Ваши часы сохранены {how}{fmt_saved(work['saved_at'])}. Можно вносить изменения дальше.")
     else:
         st.warning("Вы ещё не сохраняли часы на эту неделю.")
 
